@@ -402,6 +402,7 @@ impl App {
         event_hub: crate::api::EventHub,
     ) -> Self {
         let (prefix_code, prefix_mods) = config.prefix_key();
+        crate::bold_is_bright::set_enabled(config.ui.bold_is_bright);
         crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(APP_EVENT_CHANNEL_CAPACITY);
         let render_notify = Arc::new(Notify::new());
@@ -1518,6 +1519,7 @@ impl App {
                 self.state.copy_to_primary = config.ui.copy_to_primary;
                 self.state.keep_selection_after_copy = config.ui.keep_selection_after_copy;
                 self.state.middle_click_paste = config.ui.middle_click_paste;
+                crate::bold_is_bright::set_enabled(config.ui.bold_is_bright);
                 self.state.prompt_new_workspace_name = config.ui.prompt_new_workspace_name;
                 self.state.pane_borders = config.ui.pane_borders;
                 self.state.pane_outer_borders = config.ui.pane_outer_borders;

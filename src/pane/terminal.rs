@@ -2959,7 +2959,21 @@ fn ghostty_cell_style(
     let mut fg = basic
         .style
         .fg_color
-        .map(|color| ghostty_cell_color(color, palette_overrides))
+        .map(|color| {
+            // Most terminals draw bold + one of the 8 base colours with that
+            // colour's bright variant; ghostty renders SGR literally. Promote
+            // the index before it is resolved so a host palette override for
+            // the bright entry is still honoured.
+            let color = match color {
+                crate::ghostty::CellColor::Palette(index)
+                    if basic.style.bold && crate::bold_is_bright::is_enabled() =>
+                {
+                    crate::ghostty::CellColor::Palette(crate::bold_is_bright::brighten_index(index))
+                }
+                other => other,
+            };
+            ghostty_cell_color(color, palette_overrides)
+        })
         .or_else(|| cells.fg_color().ok().flatten().map(ghostty_color))
         .or(default_fg);
     let mut bg = cells
