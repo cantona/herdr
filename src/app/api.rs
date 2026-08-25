@@ -124,7 +124,7 @@ impl App {
 
         if let AppEvent::ClipboardWrite { content } = ev {
             #[cfg(not(test))]
-            crate::selection::write_osc52_bytes(&content);
+            crate::selection::write_selection_bytes(&content, self.state.copy_to_primary);
             #[cfg(test)]
             let _ = content;
             self.show_clipboard_feedback();

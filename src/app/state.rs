@@ -1546,6 +1546,7 @@ pub struct AppState {
     pub confirm_close: bool,
     pub prompt_new_tab_name: bool,
     pub prefix_overlay: bool,
+    pub copy_to_primary: bool,
     pub keep_selection_after_copy: bool,
     pub middle_click_paste: bool,
     /// Pane a middle click asked to paste into, drained by both input paths.
@@ -1946,6 +1947,7 @@ impl AppState {
             confirm_close: true,
             prompt_new_tab_name: true,
             prefix_overlay: true,
+            copy_to_primary: false,
             keep_selection_after_copy: false,
             middle_click_paste: false,
             pending_middle_click_paste: None,

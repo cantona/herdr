@@ -57,6 +57,7 @@ static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::ne
 
 struct ClientLoopConfig {
     sound_config: crate::config::SoundConfig,
+    copy_to_primary: bool,
     mouse_scroll_lines: usize,
     redraw_on_focus_gained: bool,
     host_cursor: crate::config::HostCursorModeConfig,
@@ -77,6 +78,9 @@ struct ClientState {
     reported_size: (u16, u16),
     /// Client-local sound playback config, refreshed on server request.
     sound_config: crate::config::SoundConfig,
+    /// Whether copies also claim this client's PRIMARY selection. Client-local:
+    /// only this process can reach the display the user is pasting into.
+    copy_to_primary: bool,
     /// Whether this client may write Kitty graphics bytes to its host terminal.
     kitty_graphics_enabled: bool,
     /// One bounded matcher, inactive unless a direct transmission is armed.
@@ -1243,6 +1247,7 @@ fn run_client_with_mode(
         loaded_config.config.experimental.kitty_graphics && !direct_attach_requested;
     let loop_config = ClientLoopConfig {
         sound_config: loaded_config.config.ui.sound,
+        copy_to_primary: loaded_config.config.ui.copy_to_primary,
         mouse_scroll_lines,
         redraw_on_focus_gained,
         host_cursor,
@@ -1417,6 +1422,7 @@ async fn run_client_loop(
         keyboard_report_all_active: false,
         reported_size: (cols, rows),
         sound_config: config.sound_config,
+        copy_to_primary: config.copy_to_primary,
         kitty_graphics_enabled: config.kitty_graphics_enabled,
         #[cfg(unix)]
         direct_graphics_response: Arc::new(Mutex::new(direct_graphics::ResponseMatcher::default())),
@@ -1852,7 +1858,7 @@ async fn run_client_loop(
                     handle_notify(kind, &message, body.as_deref(), &state.sound_config);
                 }
                 ServerMessage::Clipboard { data } => {
-                    forward_clipboard(&data);
+                    forward_clipboard(&data, state.copy_to_primary);
                     let _ = io::stdout().flush();
                 }
                 ServerMessage::WindowTitle { title } => {
@@ -1864,6 +1870,7 @@ async fn run_client_loop(
                 ServerMessage::ReloadSoundConfig => {
                     reload_local_client_config(
                         &mut state.sound_config,
+                        &mut state.copy_to_primary,
                         &mut state.redraw_on_focus_gained,
                         &mut state.draw_host_cursor,
                         &mut state.remote_image_paste_key,
@@ -2053,6 +2060,7 @@ fn client_remote_image_paste_key(
 
 fn reload_local_client_config(
     sound_config: &mut crate::config::SoundConfig,
+    copy_to_primary: &mut bool,
     redraw_on_focus_gained: &mut bool,
     draw_host_cursor: &mut bool,
     remote_image_paste_key: &mut Option<(
@@ -2067,6 +2075,7 @@ fn reload_local_client_config(
             }
             let loaded_remote_image_paste_key = client_remote_image_paste_key(&loaded.config);
             *sound_config = loaded.config.ui.sound;
+            *copy_to_primary = loaded.config.ui.copy_to_primary;
             *redraw_on_focus_gained = loaded.config.ui.redraw_on_focus_gained;
             *draw_host_cursor = should_draw_host_cursor(loaded.config.ui.host_cursor);
             *remote_image_paste_key = loaded_remote_image_paste_key;
@@ -2347,13 +2356,13 @@ fn decode_clipboard_payload(data: &str) -> Option<Vec<u8>> {
 }
 
 /// Forwards a clipboard write from the server to the local client clipboard.
-fn forward_clipboard(data: &str) {
+fn forward_clipboard(data: &str, copy_to_primary: bool) {
     let Some(bytes) = decode_clipboard_payload(data) else {
         warn!("received invalid clipboard payload from server");
         return;
     };
 
-    crate::selection::write_osc52_bytes(&bytes);
+    crate::selection::write_selection_bytes(&bytes, copy_to_primary);
 }
 
 // ---------------------------------------------------------------------------
@@ -3470,18 +3479,20 @@ mod tests {
         ));
         std::fs::write(
             &path,
-            "[ui]\nredraw_on_focus_gained = false\nhost_cursor = \"drawn\"\n",
+            "[ui]\nredraw_on_focus_gained = false\nhost_cursor = \"drawn\"\ncopy_to_primary = true\n",
         )
         .unwrap();
         let path_string = path.to_string_lossy().to_string();
         let _env = EnvVarGuard::set(crate::config::CONFIG_PATH_ENV_VAR, &path_string);
         let mut sound_config = crate::config::SoundConfig::default();
+        let mut copy_to_primary = false;
         let mut redraw_on_focus_gained = true;
         let mut draw_host_cursor = false;
         let mut remote_image_paste_key = None;
 
         reload_local_client_config(
             &mut sound_config,
+            &mut copy_to_primary,
             &mut redraw_on_focus_gained,
             &mut draw_host_cursor,
             &mut remote_image_paste_key,
@@ -3489,6 +3500,10 @@ mod tests {
 
         assert!(!redraw_on_focus_gained);
         assert!(draw_host_cursor);
+        assert!(
+            copy_to_primary,
+            "PRIMARY is claimed by the client that owns the display, so the client tracks the flag"
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -3642,7 +3657,7 @@ mod tests {
         unsafe {
             std::env::set_var("SSH_CONNECTION", "1 2 3 4");
         }
-        forward_clipboard("dGVzdA==");
+        forward_clipboard("dGVzdA==", false);
         unsafe {
             std::env::remove_var("SSH_CONNECTION");
         }
