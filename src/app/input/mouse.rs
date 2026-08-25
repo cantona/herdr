@@ -1304,10 +1304,12 @@ impl AppState {
 
     fn mode_bar_covers_tab_row(&self, col: u16, row: u16) -> bool {
         self.tab_bar_position == crate::config::TabBarPositionConfig::Bottom
-            && matches!(
-                self.mode,
-                Mode::Navigate | Mode::Prefix | Mode::Copy | Mode::Resize
-            )
+            && match self.mode {
+                // the prefix overlay only paints over the tab row when it is drawn
+                Mode::Prefix => self.prefix_overlay,
+                Mode::Navigate | Mode::Copy | Mode::Resize => true,
+                _ => false,
+            }
             && self.on_tab_bar(col, row)
     }
 
@@ -4168,6 +4170,38 @@ mod tests {
         assert!(app.state.context_menu.is_none());
         assert!(app.state.tab_presses.is_empty());
         assert!(app.state.drag.is_none());
+    }
+
+    #[test]
+    fn hidden_prefix_overlay_leaves_the_bottom_tab_row_clickable() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        ws.test_add_tab(Some("two"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Prefix;
+        app.state.prefix_overlay = false;
+        app.state.tab_bar_position = crate::config::TabBarPositionConfig::Bottom;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let second_tab = app.state.view.tab_hit_areas[1];
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            second_tab.x,
+            second_tab.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            second_tab.x,
+            second_tab.y,
+        ));
+
+        assert_eq!(
+            app.state.workspaces[0].active_tab, 1,
+            "with the overlay suppressed nothing is painted over the tab row, so it stays clickable"
+        );
     }
 
     #[test]
