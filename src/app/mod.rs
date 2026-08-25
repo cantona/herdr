@@ -664,6 +664,8 @@ impl App {
             confirm_close: config.ui.confirm_close,
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prefix_overlay: config.ui.prefix_overlay,
+            middle_click_paste: config.ui.middle_click_paste,
+            pending_middle_click_paste: None,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             pane_borders: config.ui.pane_borders,
             pane_outer_borders: config.ui.pane_outer_borders,
@@ -1511,6 +1513,7 @@ impl App {
                 self.state.confirm_close = config.ui.confirm_close;
                 self.state.prompt_new_tab_name = config.ui.prompt_new_tab_name;
                 self.state.prefix_overlay = config.ui.prefix_overlay;
+                self.state.middle_click_paste = config.ui.middle_click_paste;
                 self.state.prompt_new_workspace_name = config.ui.prompt_new_workspace_name;
                 self.state.pane_borders = config.ui.pane_borders;
                 self.state.pane_outer_borders = config.ui.pane_outer_borders;
@@ -1781,6 +1784,68 @@ impl App {
         self.route_client_events_from(LOCAL_INPUT_SOURCE, events, apply_host_terminal_theme);
     }
 
+    /// Start reading the selection for a middle click (see ui.middle_click_paste).
+    ///
+    /// The read shells out to wl-paste/xclip, which wait on the application that
+    /// owns the selection and can stall indefinitely, so it must not run on the
+    /// input path -- that path also drives every other pane and attached client.
+    /// The text comes back as `AppEvent::MiddleClickPaste`.
+    fn start_pending_middle_click_paste(&mut self) {
+        let Some(pane_id) = self.state.pending_middle_click_paste.take() else {
+            return;
+        };
+        let event_tx = self.event_tx.clone();
+        let reader = std::thread::Builder::new()
+            .name("herdr-middle-click-paste".to_string())
+            .spawn(move || {
+                let Some(text) = crate::platform::read_clipboard_text() else {
+                    return;
+                };
+                if text.is_empty() {
+                    return;
+                }
+                if event_tx
+                    .try_send(AppEvent::MiddleClickPaste { pane_id, text })
+                    .is_err()
+                {
+                    tracing::warn!(
+                        pane = pane_id.raw(),
+                        "dropped middle-click paste; app event channel is full"
+                    );
+                }
+            });
+        if let Err(err) = reader {
+            tracing::warn!(%err, "failed to start middle-click selection reader");
+        }
+    }
+
+    /// Deliver selection text read for a middle click to the pane the click
+    /// landed on. Mirrors the RawInputEvent::Paste routing.
+    pub(crate) fn route_middle_click_paste(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        text: String,
+    ) {
+        if self.try_route_paste_to_popup(&text) {
+            return;
+        }
+        if self.state.mode != Mode::Terminal {
+            // armed only in Terminal mode; mode changed while the selection was
+            // being read -- drop it rather than inject into a modal text field
+            return;
+        }
+        // the pane the click landed on, not the focused one: focus can move
+        // between the click and the text arriving
+        if let Some(ws_idx) = self.state.active {
+            if let Some(runtime) =
+                self.state
+                    .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+            {
+                let _ = runtime.try_send_paste(text);
+            }
+        }
+    }
+
     pub(crate) fn route_client_events_from(
         &mut self,
         source_id: InputSourceId,
@@ -1839,6 +1904,10 @@ impl App {
                         self.state
                             .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
                     }
+                    // Must start here too: client input never reaches the async
+                    // runtime loop, and a leftover request would later be served
+                    // from whatever pane happened to be focused by then.
+                    self.start_pending_middle_click_paste();
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
                     if self.try_route_paste_to_popup(&text) {

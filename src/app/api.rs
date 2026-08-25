@@ -131,6 +131,11 @@ impl App {
             return Vec::new();
         }
 
+        if let AppEvent::MiddleClickPaste { pane_id, text } = ev {
+            self.route_middle_click_paste(pane_id, text);
+            return Vec::new();
+        }
+
         if let AppEvent::PrefixInputSource { active } = ev {
             // Monolithic path applies the switch here. Server mode forwards it to the foreground
             // client instead (see HeadlessServer::handle_internal_event_with_forwarding); should an
