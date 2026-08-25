@@ -2276,6 +2276,26 @@ impl AppState {
     }
 
     pub fn copy_selection(&mut self, terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry) {
+        self.copy_selection_inner(terminal_runtimes, self.keep_selection_after_copy);
+    }
+
+    /// Copy and always clear, whatever keep_selection_after_copy says. Used by
+    /// the Ctrl+C retained-selection path -- leaving the selection visible there
+    /// would make every following Ctrl+C copy again instead of reaching the
+    /// program in the pane -- and by a copy-mode yank, which ends the selection
+    /// along with the mode.
+    pub fn copy_selection_clearing(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        self.copy_selection_inner(terminal_runtimes, false);
+    }
+
+    fn copy_selection_inner(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        keep: bool,
+    ) {
         let mut sel = match self.selection.take() {
             Some(sel) => sel,
             None => return,
@@ -2299,7 +2319,12 @@ impl AppState {
             }
         }
 
-        self.clear_selection();
+        if keep {
+            // put the finalized selection back so the highlight stays visible
+            self.selection = Some(sel);
+        } else {
+            self.clear_selection();
+        }
     }
 }
 

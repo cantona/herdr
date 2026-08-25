@@ -386,7 +386,10 @@ impl AppState {
             .as_ref()
             .map(|copy_mode| (copy_mode.pane_id, copy_mode.entry_offset_from_bottom));
         if copy {
-            self.copy_selection(terminal_runtimes);
+            // keep_selection_after_copy is about the drag highlight left by
+            // copy_on_select; a copy-mode yank always ends with the selection
+            // gone, like leaving copy mode any other way.
+            self.copy_selection_clearing(terminal_runtimes);
         } else {
             self.clear_selection();
         }
@@ -1927,6 +1930,28 @@ mod tests {
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
 
         assert_eq!(copy_mode_clipboard_text(&mut app), "alpha\nbeta");
+    }
+
+    #[tokio::test]
+    async fn copy_mode_yank_clears_the_selection_even_when_the_drag_highlight_is_kept() {
+        let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\n");
+        app.state.keep_selection_after_copy = true;
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 0;
+            copy_mode.cursor_col = 0;
+        }
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('v'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
+
+        assert_eq!(copy_mode_clipboard_text(&mut app), "al");
+        assert!(
+            app.state.selection.is_none(),
+            "the flag is scoped to copy_on_select, so a yank still leaves no highlight behind"
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[tokio::test]
