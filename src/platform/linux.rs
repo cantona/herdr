@@ -1,7 +1,7 @@
 use std::{
     collections::{HashSet, VecDeque},
     io::Write,
-    os::fd::RawFd,
+    os::{fd::RawFd, unix::process::CommandExt},
     path::PathBuf,
     process::{Command, Stdio},
     sync::OnceLock,
@@ -630,6 +630,7 @@ fn read_clipboard_image_with_spawned_command_max(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
         .ok()?;
     let stdout = child.stdout.take()?;
@@ -715,11 +716,15 @@ fn read_clipboard_text_commands() -> Vec<ClipboardCommand> {
 fn read_clipboard_text_with_command(command: &ClipboardCommand) -> Option<String> {
     const MAX_CLIPBOARD_TEXT_BYTES: usize = 1024 * 1024;
 
+    // Reads wait on whichever application owns the selection, and callers run them
+    // off the input path, so the helper outlives the event that started it. Its own
+    // process group keeps a pane Ctrl-C from killing it mid-read.
     let mut child = Command::new(command.program)
         .args(command.args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
         .ok()?;
 
@@ -751,11 +756,15 @@ fn read_clipboard_text_with_command(command: &ClipboardCommand) -> Option<String
 }
 
 fn run_clipboard_command(command: &ClipboardCommand, bytes: &[u8]) -> bool {
+    // Wayland and X11 selection owners keep running after the write returns. Leaving them
+    // in the caller's foreground process group lets a pane Ctrl-C or hangup kill the owner,
+    // which silently drops the copied text from the selection.
     let mut child = match Command::new(command.program)
         .args(command.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
     {
         Ok(child) => child,
@@ -1103,6 +1112,126 @@ mod tests {
         assert_eq!(commands[0].program, "wl-copy");
     }
 
+    fn process_group_id(pid: u32) -> Option<i32> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let rest = stat.get(stat.rfind(')')? + 2..)?;
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        fields.get(2)?.parse().ok()
+    }
+
+    #[test]
+    fn clipboard_reads_run_in_their_own_process_group() {
+        // `exec` so the reported pid belongs to the process herdr spawned rather
+        // than a shell child that merely inherits its group.
+        let command = ClipboardCommand {
+            program: "sh",
+            args: &["-c", "exec awk '{print $1, $5}' /proc/self/stat"],
+        };
+
+        let reported = read_clipboard_text_with_command(&command)
+            .expect("the reader should return the helper's own stat line");
+        let mut fields = reported.split_whitespace();
+        let pid: i32 = fields
+            .next()
+            .and_then(|field| field.parse().ok())
+            .expect("helper pid");
+        let pgid: i32 = fields
+            .next()
+            .and_then(|field| field.parse().ok())
+            .expect("helper pgid");
+
+        assert_eq!(
+            pid, pgid,
+            "a clipboard read must lead its own process group so a pane Ctrl-C cannot kill it mid-read"
+        );
+        assert_ne!(
+            Some(pgid),
+            process_group_id(std::process::id()),
+            "the helper must not stay in the caller's process group"
+        );
+    }
+
+    #[test]
+    fn forked_clipboard_owner_inherits_the_detached_process_group() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant, SystemTime};
+
+        let _guard = env_lock().lock().unwrap();
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system time should follow unix epoch")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "herdr-forking-wl-copy-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let fake_wl_copy = temp_dir.join("wl-copy");
+        let marker = temp_dir.join("daemon-pid");
+
+        // Real wl-copy forks the process that owns the selection and exits, so the
+        // owner herdr must protect is a grandchild it never sees.
+        std::fs::write(
+            &fake_wl_copy,
+            "#!/bin/sh\ncat > /dev/null\nsleep 30 &\nprintf '%s' \"$!\" > \"$HERDR_TEST_WL_COPY_MARKER\"\n",
+        )
+        .expect("fake wl-copy should be written");
+        let mut permissions = std::fs::metadata(&fake_wl_copy)
+            .expect("fake wl-copy metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&fake_wl_copy, permissions)
+            .expect("fake wl-copy should be executable");
+
+        let old_path = std::env::var_os("PATH");
+        let test_path = match old_path.as_ref() {
+            Some(path) => {
+                let mut paths = vec![temp_dir.clone()];
+                paths.extend(std::env::split_paths(path));
+                std::env::join_paths(paths).expect("test path should be valid")
+            }
+            None => temp_dir.clone().into_os_string(),
+        };
+        unsafe {
+            std::env::set_var("PATH", test_path);
+            std::env::set_var("HERDR_TEST_WL_COPY_MARKER", &marker);
+        }
+
+        let command = ClipboardCommand {
+            program: "wl-copy",
+            args: &["--type", "text/plain;charset=utf-8"],
+        };
+        let wrote = run_clipboard_command(&command, b"clipboard text");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let daemon_pid: u32 = std::fs::read_to_string(&marker)
+            .expect("fake wl-copy should record the pid it forked")
+            .trim()
+            .parse()
+            .expect("daemon pid should be numeric");
+        let daemon_pgid = process_group_id(daemon_pid);
+
+        unsafe {
+            libc::kill(daemon_pid as i32, libc::SIGTERM);
+            match old_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+            std::env::remove_var("HERDR_TEST_WL_COPY_MARKER");
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        assert!(wrote);
+        assert_ne!(
+            daemon_pgid,
+            process_group_id(std::process::id()),
+            "the forked selection owner must inherit the detached group, not the caller's"
+        );
+    }
+
     #[test]
     fn wl_copy_owner_does_not_block_clipboard_write() {
         use std::ffi::OsString;
@@ -1201,6 +1330,7 @@ mod tests {
             .parse()
             .expect("owner pid should be numeric");
         cleanup.owner_pid = Some(owner_pid);
+        let owner_pgid = process_group_id(owner_pid as u32).expect("owner pgid should be readable");
         let returned_while_owner_running = result_rx
             .recv_timeout(Duration::from_secs(2))
             .is_ok_and(|result| result);
@@ -1228,6 +1358,10 @@ mod tests {
         assert!(
             owner_was_reaped,
             "wl-copy owner should be reaped after exit"
+        );
+        assert_eq!(
+            owner_pgid, owner_pid,
+            "wl-copy must lead its own process group so pane signals cannot kill the selection owner"
         );
     }
 
