@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) struct ClientLoopConfig {
     pub(super) sound_config: crate::config::SoundConfig,
+    pub(super) copy_to_primary: bool,
     pub(super) mouse_scroll_lines: usize,
     pub(super) redraw_on_focus_gained: bool,
     pub(super) host_cursor: crate::config::HostCursorModeConfig,

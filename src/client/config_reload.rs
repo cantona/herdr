@@ -16,6 +16,7 @@ pub(super) fn apply_reload(
     let mut mouse_capture = previous_mouse_capture;
     reload_local_client_config(
         &mut state.sound_config,
+        &mut state.copy_to_primary,
         &mut state.redraw_on_focus_gained,
         &mut state.draw_host_cursor,
         &mut state.remote_image_paste_key,
@@ -91,6 +92,7 @@ pub(super) fn apply_reload(
 
 pub(super) fn reload_local_client_config(
     sound_config: &mut crate::config::SoundConfig,
+    copy_to_primary: &mut bool,
     redraw_on_focus_gained: &mut bool,
     draw_host_cursor: &mut bool,
     remote_image_paste_key: &mut Option<(
@@ -113,6 +115,7 @@ pub(super) fn reload_local_client_config(
                     warn!(diagnostic = %diagnostic, "local sound config diagnostic");
                 }
                 *sound_config = loaded.config.ui.sound.clone();
+                *copy_to_primary = loaded.config.ui.copy_to_primary;
                 *redraw_on_focus_gained = loaded.config.ui.redraw_on_focus_gained;
                 *draw_host_cursor = should_draw_host_cursor(loaded.config.ui.host_cursor);
                 *mouse_capture = loaded.config.ui.mouse_capture;

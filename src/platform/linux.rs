@@ -858,6 +858,41 @@ pub fn write_clipboard(bytes: &[u8]) -> bool {
     false
 }
 
+/// Write the X/Wayland PRIMARY selection (what middle click pastes in other
+/// apps). Separate from write_clipboard: herdr only owns CLIPBOARD upstream.
+pub fn write_primary_selection(bytes: &[u8]) -> bool {
+    for command in primary_selection_commands() {
+        if run_clipboard_command(&command, bytes) {
+            return true;
+        }
+    }
+    false
+}
+
+fn primary_selection_commands() -> Vec<ClipboardCommand> {
+    let mut commands = Vec::new();
+
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        commands.push(ClipboardCommand {
+            program: "wl-copy",
+            args: &["--primary", "--type", "text/plain;charset=utf-8"],
+        });
+    }
+
+    if std::env::var_os("DISPLAY").is_some() {
+        commands.push(ClipboardCommand {
+            program: "xclip",
+            args: &["-selection", "primary", "-in"],
+        });
+        commands.push(ClipboardCommand {
+            program: "xsel",
+            args: &["--primary", "--input"],
+        });
+    }
+
+    commands
+}
+
 pub fn read_clipboard_text() -> Option<String> {
     for command in read_clipboard_text_commands() {
         if let Some(text) = read_clipboard_text_with_command(&command) {
@@ -1757,6 +1792,75 @@ mod tests {
         let commands = clipboard_commands();
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].program, "wl-copy");
+    }
+
+    #[test]
+    fn primary_selection_commands_prefer_wayland_and_fall_back_to_x11() {
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
+            std::env::remove_var("DISPLAY");
+        }
+        let commands = primary_selection_commands();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].program, "wl-copy");
+        assert!(commands[0].args.contains(&"--primary"));
+
+        unsafe {
+            std::env::remove_var("WAYLAND_DISPLAY");
+            std::env::set_var("DISPLAY", ":0");
+        }
+        let commands = primary_selection_commands();
+        let programs: Vec<&str> = commands.iter().map(|command| command.program).collect();
+        assert_eq!(programs, ["xclip", "xsel"]);
+        assert!(commands
+            .iter()
+            .all(|command| command.args.iter().any(|arg| arg.contains("primary"))));
+    }
+
+    #[test]
+    #[ignore = "requires a Wayland or X11 display; replaces the user's PRIMARY selection"]
+    fn live_primary_selection_round_trip() {
+        use std::time::{Duration, Instant, SystemTime};
+
+        let _guard = env_lock().lock().unwrap();
+        let payload = format!(
+            "herdr-primary-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("system time should follow unix epoch")
+                .as_nanos()
+        );
+        assert!(
+            write_primary_selection(payload.as_bytes()),
+            "no PRIMARY helper accepted the write"
+        );
+
+        let (program, args): (&str, &[&str]) = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            ("wl-paste", &["--primary", "--no-newline"])
+        } else {
+            ("xsel", &["--primary", "--output"])
+        };
+        // The selection owner forked by the helper may need a moment to answer.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let output = Command::new(program)
+                .args(args)
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .expect("PRIMARY reader should start");
+            if output.stdout == payload.as_bytes() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "PRIMARY holds {:?}, expected {payload:?}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     #[test]

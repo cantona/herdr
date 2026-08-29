@@ -924,6 +924,12 @@
           "description": "Automatically copy text selected by mouse drag or double-click. When disabled, Ctrl+C or a host-forwarded Cmd+C copies and clears the retained selection."
         },
         {
+          "key": "ui.copy_to_primary",
+          "type": "boolean",
+          "default": "false",
+          "description": "Also copy into the X11/Wayland PRIMARY selection, so other apps can paste it with middle click. Read by the client that owns the display, and ignored when the clipboard is handed to the host terminal over OSC 52."
+        },
+        {
           "key": "ui.keep_selection_after_copy",
           "type": "boolean",
           "default": "false",
