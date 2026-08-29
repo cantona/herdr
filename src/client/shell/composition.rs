@@ -117,17 +117,27 @@ impl ClientShellState {
                 Style::default().fg(self.config.palette.overlay0),
             );
         }
-        render::render_mode_bar(
-            &mut buffer,
-            Rect::new(0, 0, cols, rows),
-            self.mode,
-            None,
-            self.endpoint_error.as_deref(),
-            false,
-            &self.config.keybinds,
-            &self.config.palette,
-        );
+        if !self.prefix_hint_hidden() {
+            render::render_mode_bar(
+                &mut buffer,
+                Rect::new(0, 0, cols, rows),
+                self.mode,
+                None,
+                self.endpoint_error.as_deref(),
+                false,
+                &self.config.keybinds,
+                &self.config.palette,
+            );
+        }
         FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[])
+    }
+
+    /// `ui.prefix_overlay = false` leaves the prefix hint undrawn, so nothing is painted over
+    /// a bottom tab row. An endpoint error still needs the bar: that is where it is shown.
+    fn prefix_hint_hidden(&self) -> bool {
+        self.mode == ClientShellMode::Prefix
+            && !self.config.prefix_overlay
+            && self.endpoint_error.is_none()
     }
 
     pub(crate) fn compose(&mut self, cols: u16, rows: u16) -> Option<FrameData> {
@@ -289,20 +299,21 @@ impl ClientShellState {
         let mobile_navigate_panel = !layout.mobile_header.is_empty()
             && self.mode == ClientShellMode::Navigate
             && self.endpoint_error.is_none();
-        let mode_bar = if mobile_navigate_panel || self.overlay.is_some() {
-            None
-        } else {
-            render::render_mode_bar(
-                &mut buffer,
-                mode_bar_area,
-                self.mode,
-                self.copy_mode.as_ref(),
-                self.endpoint_error.as_deref(),
-                snapshot.update_available.is_some(),
-                &self.config.keybinds,
-                &self.config.palette,
-            )
-        };
+        let mode_bar =
+            if mobile_navigate_panel || self.overlay.is_some() || self.prefix_hint_hidden() {
+                None
+            } else {
+                render::render_mode_bar(
+                    &mut buffer,
+                    mode_bar_area,
+                    self.mode,
+                    self.copy_mode.as_ref(),
+                    self.endpoint_error.as_deref(),
+                    snapshot.update_available.is_some(),
+                    &self.config.keybinds,
+                    &self.config.palette,
+                )
+            };
         if mode_bar == Some(layout.tab_bar) {
             self.hits.tabs.clear();
             self.hits.new_tab = Rect::default();

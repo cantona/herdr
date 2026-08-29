@@ -900,6 +900,12 @@
           "description": "Capture mouse input for Herdr's mouse UI."
         },
         {
+          "key": "ui.prefix_overlay",
+          "type": "boolean",
+          "default": "true",
+          "description": "Show the prefix key overlay after pressing the prefix. With it off nothing is painted over the tab row, which stays clickable."
+        },
+        {
           "key": "ui.copy_on_select",
           "type": "boolean",
           "default": "true",

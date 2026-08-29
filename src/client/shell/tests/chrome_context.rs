@@ -523,3 +523,45 @@ fn close_confirmation_error_becomes_client_owned_overlay_and_stable_group_close(
             if params.workspace_id == "ws_1" && params.close_group
     ));
 }
+
+#[test]
+fn hidden_prefix_overlay_leaves_the_bottom_tab_row_clickable() {
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.tab_bar_position = crate::config::TabBarPositionConfig::Bottom;
+    config.hide_tab_bar_when_single_tab = false;
+    config.prefix_overlay = false;
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.mode = ClientShellMode::Prefix;
+
+    let frame = state
+        .compose(106, 20)
+        .expect("prefix frame without the hint");
+    assert!(
+        !frame_rows(&frame)[19].contains("PREFIX"),
+        "ui.prefix_overlay = false must not draw the prefix hint"
+    );
+    assert!(
+        !state.hits.tabs.is_empty(),
+        "with the hint suppressed nothing is painted over the tab row, so it stays clickable"
+    );
+
+    state.config.prefix_overlay = true;
+    let frame = state.compose(106, 20).expect("prefix frame with the hint");
+    assert!(frame_rows(&frame)[19].contains("PREFIX"));
+    assert!(
+        state.hits.tabs.is_empty(),
+        "the drawn hint covers the bottom tab row"
+    );
+
+    state.config.prefix_overlay = false;
+    state.set_endpoint_error("endpoint unavailable".to_owned());
+    let frame = state
+        .compose(106, 20)
+        .expect("prefix frame with an endpoint error");
+    assert!(
+        frame_rows(&frame)[19].contains("ERROR"),
+        "an endpoint error is still reported in the mode bar"
+    );
+}
