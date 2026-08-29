@@ -894,10 +894,34 @@
           "description": "Capture mouse input for Herdr's mouse UI."
         },
         {
+          "key": "ui.prefix_overlay",
+          "type": "boolean",
+          "default": "true",
+          "description": "Show the prefix key overlay after pressing the prefix. With it off nothing is painted over the tab row, which stays clickable."
+        },
+        {
           "key": "ui.copy_on_select",
           "type": "boolean",
           "default": "true",
           "description": "Automatically copy text selected by mouse drag or double-click. When disabled, Ctrl+C or a host-forwarded Cmd+C copies and clears the retained selection."
+        },
+        {
+          "key": "ui.copy_to_primary",
+          "type": "boolean",
+          "default": "false",
+          "description": "Also copy into the X11/Wayland PRIMARY selection, so other apps can paste it with middle click. Read by the client that owns the display, and ignored when the clipboard is handed to the host terminal over OSC 52."
+        },
+        {
+          "key": "ui.keep_selection_after_copy",
+          "type": "boolean",
+          "default": "false",
+          "description": "Keep the drag selection highlighted after copy_on_select copies it. Copy-mode yanks always clear the selection."
+        },
+        {
+          "key": "ui.middle_click_paste",
+          "type": "boolean",
+          "default": "false",
+          "description": "Paste the clipboard into the pane under the cursor on middle click instead of forwarding the click to the program. The selection is read off the input path, so a slow clipboard owner never stalls the UI."
         },
         {
           "key": "ui.host_cursor",
@@ -969,6 +993,12 @@
           "type": "boolean",
           "default": "true",
           "description": "Keep split panes visually separated instead of sharing divider borders."
+        },
+        {
+          "key": "ui.bold_is_bright",
+          "type": "boolean",
+          "default": "false",
+          "description": "Render bold text that uses one of the 8 base ANSI colours with that colour’s bright variant, as most terminals do. Palette overrides for the bright entry still apply."
         },
         {
           "key": "ui.show_agent_labels_on_pane_borders",
