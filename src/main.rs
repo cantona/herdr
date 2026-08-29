@@ -57,6 +57,7 @@ fn set_host_color_scheme_reports(enabled: bool) -> io::Result<()> {
 mod agent_resume;
 mod api;
 mod app;
+mod bold_is_bright;
 mod build_info;
 mod checksum;
 mod cli;
