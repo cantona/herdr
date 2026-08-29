@@ -41,6 +41,7 @@ pub(crate) struct ClientShellConfig {
     pub(super) prompt_new_tab_name: bool,
     pub(super) prompt_new_workspace_name: bool,
     pub(super) prefix_overlay: bool,
+    pub(super) keep_selection_after_copy: bool,
     pub(super) middle_click_paste: bool,
     pub(super) confirm_close: bool,
     pub(super) mouse_capture: bool,

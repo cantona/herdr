@@ -968,6 +968,9 @@ pub struct UiConfig {
     pub prompt_new_workspace_name: bool,
     /// Show the prefix key overlay after pressing the prefix. Default: true.
     pub prefix_overlay: bool,
+    /// Keep the drag selection highlighted after copy_on_select copies it.
+    /// Default: false (upstream clears the highlight on mouse-up).
+    pub keep_selection_after_copy: bool,
     /// Paste the clipboard into the pane under the cursor on middle click
     /// instead of forwarding the click to the program. Default: false.
     pub middle_click_paste: bool,
@@ -1219,6 +1222,7 @@ impl Default for UiConfig {
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             prefix_overlay: true,
+            keep_selection_after_copy: false,
             middle_click_paste: false,
             pane_borders: PaneBordersConfig::Auto,
             pane_outer_borders: true,

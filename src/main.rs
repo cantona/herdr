@@ -268,6 +268,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # or Cmd+C when the host forwards it, copies and clears it.
 # copy_on_select = true
 
+# Keep the drag selection highlighted after copy_on_select copies it,
+# until the next click or key press.
+# keep_selection_after_copy = false
+
 # Paste the clipboard into the pane under the cursor on middle click
 # instead of forwarding the click to the program.
 # middle_click_paste = false

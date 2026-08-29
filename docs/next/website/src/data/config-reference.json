@@ -924,6 +924,12 @@
           "description": "Automatically copy text selected by mouse drag or double-click. When disabled, Ctrl+C or a host-forwarded Cmd+C copies and clears the retained selection."
         },
         {
+          "key": "ui.keep_selection_after_copy",
+          "type": "boolean",
+          "default": "false",
+          "description": "Keep the drag selection highlighted after copy_on_select copies it. Copy-mode yanks always clear the selection."
+        },
+        {
           "key": "ui.middle_click_paste",
           "type": "boolean",
           "default": "false",

@@ -148,7 +148,9 @@ impl ClientShellState {
             self.word_selection_gesture = None;
             if self.config.copy_on_select {
                 self.request_selection_copy(outcome, false);
-                if dragged {
+                if self.config.keep_selection_after_copy {
+                    // the word highlight stays like a drag highlight: until the next click or key
+                } else if dragged {
                     self.selection = None;
                 } else {
                     self.selection_highlight_clear_deadline =
