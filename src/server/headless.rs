@@ -2610,7 +2610,7 @@ impl HeadlessServer {
     /// notifications to connected clients instead of processing them locally.
     ///
     /// In the monolithic mode:
-    /// - `ClipboardWrite` events are written to stdout via `write_osc52_bytes`.
+    /// - `ClipboardWrite` events are written to stdout via `write_selection_bytes`.
     /// - Sound notifications are played locally via `sound::play`.
     /// - Toast notifications are set on AppState and rendered into the frame.
     ///

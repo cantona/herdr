@@ -879,6 +879,9 @@ pub struct UiConfig {
     pub prompt_new_workspace_name: bool,
     /// Show the prefix key overlay after pressing the prefix. Default: true.
     pub prefix_overlay: bool,
+    /// Also copy into the X/Wayland PRIMARY selection, so other apps can
+    /// paste it with middle click. Default: false.
+    pub copy_to_primary: bool,
     /// Keep the drag selection highlighted after copy_on_select copies it.
     /// Default: false (upstream clears the highlight on mouse-up).
     pub keep_selection_after_copy: bool,
@@ -1125,6 +1128,7 @@ impl Default for UiConfig {
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             prefix_overlay: true,
+            copy_to_primary: false,
             keep_selection_after_copy: false,
             middle_click_paste: false,
             pane_borders: true,

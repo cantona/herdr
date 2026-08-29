@@ -458,6 +458,41 @@ pub fn write_clipboard(bytes: &[u8]) -> bool {
     false
 }
 
+/// Write the X/Wayland PRIMARY selection (what middle click pastes in other
+/// apps). Separate from write_clipboard: herdr only owns CLIPBOARD upstream.
+pub fn write_primary_selection(bytes: &[u8]) -> bool {
+    for command in primary_selection_commands() {
+        if run_clipboard_command(&command, bytes) {
+            return true;
+        }
+    }
+    false
+}
+
+fn primary_selection_commands() -> Vec<ClipboardCommand> {
+    let mut commands = Vec::new();
+
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        commands.push(ClipboardCommand {
+            program: "wl-copy",
+            args: &["--primary", "--type", "text/plain;charset=utf-8"],
+        });
+    }
+
+    if std::env::var_os("DISPLAY").is_some() {
+        commands.push(ClipboardCommand {
+            program: "xclip",
+            args: &["-selection", "primary", "-in"],
+        });
+        commands.push(ClipboardCommand {
+            program: "xsel",
+            args: &["--primary", "--input"],
+        });
+    }
+
+    commands
+}
+
 pub fn read_clipboard_text() -> Option<String> {
     for command in read_clipboard_text_commands() {
         if let Some(text) = read_clipboard_text_with_command(&command) {
