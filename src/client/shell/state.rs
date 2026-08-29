@@ -40,6 +40,7 @@ pub(crate) struct ClientShellConfig {
     pub(super) keybinding_source: ClientShellKeybindingSource,
     pub(super) prompt_new_tab_name: bool,
     pub(super) prompt_new_workspace_name: bool,
+    pub(super) prefix_overlay: bool,
     pub(super) confirm_close: bool,
     pub(super) mouse_capture: bool,
     pub(super) mouse_scroll_lines: usize,
