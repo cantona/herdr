@@ -877,6 +877,8 @@ pub struct UiConfig {
     pub prompt_new_tab_name: bool,
     /// Ask for a workspace name before interactive creation. Default: false.
     pub prompt_new_workspace_name: bool,
+    /// Show the prefix key overlay after pressing the prefix. Default: true.
+    pub prefix_overlay: bool,
     /// Draw borders around split panes. Default: true.
     pub pane_borders: bool,
     /// Draw borders along the outside edge of the pane area. Default: true.
@@ -1116,6 +1118,7 @@ impl Default for UiConfig {
             confirm_close: true,
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
+            prefix_overlay: true,
             pane_borders: true,
             pane_outer_borders: true,
             pane_scrollbars: true,
