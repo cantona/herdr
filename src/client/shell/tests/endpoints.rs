@@ -138,6 +138,7 @@ fn workspace_navigation_waits_for_the_target_presentation_fence() {
             Some(&mut state),
             &mut Vec::new(),
             &mut scheduled,
+            false,
         )
         .unwrap();
         if !surface_active {

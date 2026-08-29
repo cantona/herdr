@@ -352,7 +352,9 @@ fn should_prefer_osc52() -> bool {
     )
 }
 
-/// Write clipboard bytes to the system clipboard via native platform tools or OSC 52.
+/// Write clipboard bytes to the system clipboard via native platform tools or
+/// OSC 52, optionally also claiming the X11/Wayland PRIMARY selection (see
+/// `ui.copy_to_primary`).
 ///
 /// OSC 52 format: `ESC ] 52 ; c ; <base64> BEL`
 ///
@@ -360,19 +362,53 @@ fn should_prefer_osc52() -> bool {
 /// emits BEL here even though ST works in newer emulators.
 ///
 /// Returns false when the clipboard already holds the same text or output fails.
-pub fn write_osc52_bytes(bytes: &[u8]) -> bool {
-    let prefer_osc52 = should_prefer_osc52();
-    if !prefer_osc52 && crate::platform::clipboard_text_matches(bytes) == Some(true) {
+///
+/// This must run in the process that owns the display the user is looking at --
+/// the client in server mode -- or PRIMARY lands on the wrong machine. When the
+/// clipboard is handed to the host terminal over OSC 52 there is no local
+/// display to claim, so PRIMARY is skipped.
+pub fn write_selection_bytes(bytes: &[u8], also_primary: bool) -> bool {
+    write_selection_bytes_with(
+        bytes,
+        also_primary,
+        should_prefer_osc52(),
+        crate::platform::clipboard_text_matches,
+        crate::platform::write_primary_selection,
+        crate::platform::write_clipboard,
+        |sequence| {
+            let mut stdout = std::io::stdout();
+            stdout.write_all(sequence.as_bytes()).is_ok() && stdout.flush().is_ok()
+        },
+    )
+}
+
+/// `write_selection_bytes` with the platform calls injected, so the order of
+/// the PRIMARY write, the duplicate check and the OSC 52 fallback is testable
+/// without a display.
+fn write_selection_bytes_with(
+    bytes: &[u8],
+    also_primary: bool,
+    prefer_osc52: bool,
+    clipboard_text_matches: impl FnOnce(&[u8]) -> Option<bool>,
+    write_primary: impl FnOnce(&[u8]) -> bool,
+    write_clipboard: impl FnOnce(&[u8]) -> bool,
+    write_osc52: impl FnOnce(&str) -> bool,
+) -> bool {
+    if !prefer_osc52 && also_primary {
+        // PRIMARY is written before the CLIPBOARD duplicate check: another app may have
+        // claimed PRIMARY since the last copy, so it needs refreshing even when CLIPBOARD
+        // already holds this text. Best effort: X11/Wayland-only and may have no helper.
+        write_primary(bytes);
+    }
+    if !prefer_osc52 && clipboard_text_matches(bytes) == Some(true) {
         tracing::debug!(bytes = bytes.len(), "suppressed duplicate clipboard write");
         return false;
     }
 
-    if !prefer_osc52 && crate::platform::write_clipboard(bytes) {
+    if !prefer_osc52 && write_clipboard(bytes) {
         true
     } else {
-        let sequence = osc52_sequence(bytes);
-        let mut stdout = std::io::stdout();
-        stdout.write_all(sequence.as_bytes()).is_ok() && stdout.flush().is_ok()
+        write_osc52(&osc52_sequence(bytes))
     }
 }
 
@@ -649,5 +685,95 @@ mod tests {
         let (ar, ac) = sel.anchor_screen_pos(pane_inner, None);
         // Screen position of the anchor must match the mouse position
         assert_eq!((ar, ac), (8, 15));
+    }
+
+    struct SelectionWrites {
+        primary: std::cell::Cell<u32>,
+        clipboard: std::cell::Cell<u32>,
+        osc52: std::cell::RefCell<Option<String>>,
+    }
+
+    impl SelectionWrites {
+        fn new() -> Self {
+            Self {
+                primary: std::cell::Cell::new(0),
+                clipboard: std::cell::Cell::new(0),
+                osc52: std::cell::RefCell::new(None),
+            }
+        }
+
+        fn run(
+            &self,
+            also_primary: bool,
+            prefer_osc52: bool,
+            matches: Option<bool>,
+            clipboard_ok: bool,
+        ) -> bool {
+            write_selection_bytes_with(
+                b"text",
+                also_primary,
+                prefer_osc52,
+                |_| matches,
+                |_| {
+                    self.primary.set(self.primary.get() + 1);
+                    true
+                },
+                |_| {
+                    self.clipboard.set(self.clipboard.get() + 1);
+                    clipboard_ok
+                },
+                |sequence| {
+                    *self.osc52.borrow_mut() = Some(sequence.to_owned());
+                    true
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn primary_is_written_even_when_the_clipboard_already_matches() {
+        let writes = SelectionWrites::new();
+        assert!(!writes.run(true, false, Some(true), true));
+        assert_eq!(
+            writes.primary.get(),
+            1,
+            "PRIMARY may have moved to another app"
+        );
+        assert_eq!(
+            writes.clipboard.get(),
+            0,
+            "duplicate CLIPBOARD write stays suppressed"
+        );
+        assert!(writes.osc52.borrow().is_none());
+    }
+
+    #[test]
+    fn primary_follows_the_flag_and_the_osc52_preference() {
+        let writes = SelectionWrites::new();
+        assert!(writes.run(false, false, None, true));
+        assert_eq!(writes.primary.get(), 0, "copy_to_primary off");
+        assert_eq!(writes.clipboard.get(), 1);
+
+        let writes = SelectionWrites::new();
+        assert!(writes.run(true, true, None, true));
+        assert_eq!(
+            writes.primary.get(),
+            0,
+            "no local display to claim over OSC 52"
+        );
+        assert_eq!(writes.clipboard.get(), 0);
+        assert_eq!(
+            writes.osc52.borrow().as_deref(),
+            Some(osc52_sequence(b"text").as_str())
+        );
+    }
+
+    #[test]
+    fn native_write_failure_falls_back_to_osc52_after_primary() {
+        let writes = SelectionWrites::new();
+        assert!(writes.run(true, false, Some(false), false));
+        assert_eq!(writes.primary.get(), 1);
+        assert_eq!(writes.clipboard.get(), 1);
+        assert!(writes.osc52.borrow().is_some());
     }
 }
