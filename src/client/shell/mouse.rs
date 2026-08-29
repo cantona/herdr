@@ -1719,7 +1719,11 @@ impl ClientShellState {
                 .is_some_and(crate::selection::Selection::finish);
             if copied && self.config.copy_on_select {
                 self.request_selection_copy(outcome, true);
-                self.selection = None;
+                // ui.keep_selection_after_copy leaves the finalized highlight in place; the
+                // next click or key clears it
+                if !self.config.keep_selection_after_copy {
+                    self.selection = None;
+                }
             } else if self
                 .selection
                 .as_ref()

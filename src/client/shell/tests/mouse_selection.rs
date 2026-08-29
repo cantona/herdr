@@ -1272,3 +1272,102 @@ fn middle_click_paste_is_not_armed_outside_terminal_mode() {
         "a middle click must not inject text while a mode or overlay owns the keyboard"
     );
 }
+
+fn drag_select_two_cells(state: &mut ClientShellState) -> ClientShellInput {
+    let pane = state.hits.panes[0].clone();
+    let mut mouse = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: pane.inner_rect.x,
+        row: pane.inner_rect.y,
+        modifiers: KeyModifiers::empty(),
+    };
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    mouse.kind = MouseEventKind::Drag(MouseButton::Left);
+    mouse.column += 2;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    mouse.kind = MouseEventKind::Up(MouseButton::Left);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)])
+}
+
+fn requests_selection_copy(actions: &[ClientShellAction]) -> bool {
+    matches!(
+        actions,
+        [ClientShellAction::Endpoint { request, .. }]
+            if matches!(request.method, crate::api::schema::Method::PaneSelectionRead(_))
+    )
+}
+
+#[test]
+fn keep_selection_after_copy_leaves_the_drag_highlight_visible() {
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.keep_selection_after_copy = true;
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(106, 20).expect("pane frame");
+
+    let release = drag_select_two_cells(&mut state);
+
+    assert!(
+        requests_selection_copy(&release.actions),
+        "copy_on_select still copies"
+    );
+    assert!(
+        state
+            .selection
+            .as_ref()
+            .is_some_and(crate::selection::Selection::is_finalized),
+        "the copied selection stays highlighted"
+    );
+
+    let pane = state.hits.panes[0].clone();
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: pane.inner_rect.x + 3,
+        row: pane.inner_rect.y + 1,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(
+        state
+            .selection
+            .as_ref()
+            .is_none_or(|selection| !selection.is_finalized()),
+        "the next click drops the kept highlight"
+    );
+}
+
+#[test]
+fn copy_on_select_clears_the_drag_highlight_by_default() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(106, 20).expect("pane frame");
+
+    let release = drag_select_two_cells(&mut state);
+
+    assert!(requests_selection_copy(&release.actions));
+    assert!(state.selection.is_none());
+}
+
+#[test]
+fn keep_selection_after_copy_leaves_the_word_highlight_without_a_timer() {
+    let mut state = word_drag_state(true);
+    state.config.keep_selection_after_copy = true;
+    let initial = start_word_drag(&mut state);
+    assert!(word_row_reply(&mut state, &initial, "alpha bravo charlie").is_empty());
+
+    let actions = word_drag_mouse(&mut state, MouseEventKind::Up(MouseButton::Left), 0, 8).actions;
+
+    assert!(requests_selection_copy(&actions));
+    let copied = word_row_reply(&mut state, &word_read_id(&actions), "bravo");
+    assert!(matches!(&copied[..], [ClientShellAction::ClipboardWrite(bytes)] if bytes == b"bravo"));
+    assert!(
+        state.selection_highlight_clear_deadline.is_none(),
+        "no timed clear: the highlight stays until the next click or key"
+    );
+    state.tick_copy_feedback(std::time::Instant::now() + std::time::Duration::from_secs(1));
+    assert!(state
+        .selection
+        .as_ref()
+        .is_some_and(crate::selection::Selection::is_visible));
+}
