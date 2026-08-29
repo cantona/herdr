@@ -18,6 +18,9 @@ pub(super) struct ClientState {
     pub(super) reported_size: (u16, u16),
     pub(super) reported_cell_size: (u32, u32),
     pub(super) sound_config: crate::config::SoundConfig,
+    /// Whether copies also claim this client's PRIMARY selection. Client-local: only this
+    /// process can reach the display the user is pasting into.
+    pub(super) copy_to_primary: bool,
     pub(super) kitty_graphics_enabled: bool,
     pub(super) pixel_geometry_enabled: bool,
     pub(super) pixel_geometry_exact: bool,
@@ -75,6 +78,7 @@ impl ClientState {
             reported_size: (100, 30),
             reported_cell_size: (0, 0),
             sound_config: Default::default(),
+            copy_to_primary: false,
             kitty_graphics_enabled: false,
             pixel_geometry_enabled: false,
             pixel_geometry_exact: false,

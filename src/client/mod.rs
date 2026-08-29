@@ -181,6 +181,7 @@ fn run_client_with_mode(
         .is_some_and(shell::ClientShellConfig::uses_endpoint_keybindings);
     let loop_config = ClientLoopConfig {
         sound_config: loaded_config.config.ui.sound,
+        copy_to_primary: loaded_config.config.ui.copy_to_primary,
         mouse_scroll_lines,
         redraw_on_focus_gained,
         host_cursor,
@@ -398,6 +399,7 @@ async fn run_client_loop(
         reported_size: (cols, rows),
         reported_cell_size: (initial_cell_width_px, initial_cell_height_px),
         sound_config: config.sound_config,
+        copy_to_primary: config.copy_to_primary,
         kitty_graphics_enabled: config.kitty_graphics_enabled,
         pixel_geometry_enabled: config.pixel_geometry_enabled,
         pixel_geometry_exact: initial_pixel_geometry_exact,
@@ -1746,6 +1748,7 @@ async fn run_client_loop(
                             state.shell.as_mut(),
                             &mut state.detached_process_children,
                             &mut scheduled_activation,
+                            state.copy_to_primary,
                         )?;
                         let repaint = repaint || dispatch_repaint;
                         if replay_mouse.is_empty() {
@@ -1784,7 +1787,7 @@ async fn run_client_loop(
                         }
                     }
                     ServerMessage::Clipboard { data } => {
-                        if forward_clipboard(&data) {
+                        if forward_clipboard(&data, state.copy_to_primary) {
                             let (width, height) = state.reported_size;
                             let frame = state.shell.as_mut().and_then(|shell| {
                                 shell

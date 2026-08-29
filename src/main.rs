@@ -262,6 +262,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # or Cmd+C when the host forwards it, copies and clears it.
 # copy_on_select = true
 
+# Also copy into the X11/Wayland PRIMARY selection so other apps can paste it
+# with middle click. Ignored when the clipboard goes to the host terminal over OSC 52.
+# copy_to_primary = false
+
 # Keep the drag selection highlighted after copy_on_select copies it,
 # until the next click or key press.
 # keep_selection_after_copy = false

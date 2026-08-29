@@ -352,15 +352,28 @@ fn should_prefer_osc52() -> bool {
     )
 }
 
-/// Write clipboard bytes to the system clipboard via native platform tools or OSC 52.
+/// Write clipboard bytes to the system clipboard via native platform tools or
+/// OSC 52, optionally also claiming the X11/Wayland PRIMARY selection (see
+/// `ui.copy_to_primary`).
 ///
 /// OSC 52 format: `ESC ] 52 ; c ; <base64> BEL`
 ///
 /// Some terminals still only honor BEL-terminated OSC 52 writes, so herdr
 /// emits BEL here even though ST works in newer emulators.
-pub fn write_osc52_bytes(bytes: &[u8]) {
-    if !should_prefer_osc52() && crate::platform::write_clipboard(bytes) {
-        return;
+///
+/// This must run in the process that owns the display the user is looking at --
+/// the client in server mode -- or PRIMARY lands on the wrong machine. When the
+/// clipboard is handed to the host terminal over OSC 52 there is no local
+/// display to claim, so PRIMARY is skipped.
+pub fn write_selection_bytes(bytes: &[u8], also_primary: bool) {
+    if !should_prefer_osc52() {
+        if also_primary {
+            // best effort: PRIMARY is X11/Wayland-only and may have no helper
+            crate::platform::write_primary_selection(bytes);
+        }
+        if crate::platform::write_clipboard(bytes) {
+            return;
+        }
     }
 
     let sequence = osc52_sequence(bytes);

@@ -284,6 +284,7 @@ fn local_selection_is_scheduled_ahead_of_a_full_event_queue() {
         None,
         &mut Vec::new(),
         &mut scheduled,
+        false,
     )
     .unwrap();
     let next = scheduled.take().or_else(|| rx.try_recv().ok());
@@ -316,6 +317,7 @@ fn dispatcher_cancels_worktree_requests_on_frozen_surface_or_failed_send() {
             Some(&mut state),
             &mut Vec::new(),
             &mut scheduled,
+            false,
         )
         .unwrap();
         assert!(repaint);
