@@ -262,6 +262,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # or Cmd+C when the host forwards it, copies and clears it.
 # copy_on_select = true
 
+# Paste the clipboard into the pane under the cursor on middle click
+# instead of forwarding the click to the program.
+# middle_click_paste = false
+
 # Host cursor policy: "auto", "native", or "drawn".
 # "auto" draws Herdr's own cursor on native Windows builds and WSL to avoid ConPTY cursor flicker, and uses the native terminal cursor elsewhere.
 # "native" always uses the outer terminal cursor. "drawn" always draws Herdr's cursor as terminal cell content.

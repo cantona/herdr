@@ -147,6 +147,7 @@ impl ClientShellConfig {
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             prefix_overlay: config.ui.prefix_overlay,
+            middle_click_paste: config.ui.middle_click_paste,
             confirm_close: config.ui.confirm_close,
             mouse_capture: config.ui.mouse_capture,
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
@@ -338,6 +339,7 @@ impl ClientShellConfig {
                 self.prompt_new_tab_name = ui.prompt_new_tab_name;
                 self.prompt_new_workspace_name = ui.prompt_new_workspace_name;
                 self.prefix_overlay = ui.prefix_overlay;
+                self.middle_click_paste = ui.middle_click_paste;
                 self.confirm_close = ui.confirm_close;
                 self.mouse_capture = ui.mouse_capture;
                 self.mouse_scroll_lines = ui.mouse_scroll_lines();

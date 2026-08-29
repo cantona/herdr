@@ -235,7 +235,13 @@ impl ClientShellState {
                         }
                     }
                 }
-                RawInputEvent::Mouse(mouse) => self.handle_mouse(mouse, &mut outcome),
+                RawInputEvent::Mouse(mouse) => {
+                    self.handle_mouse(mouse, &mut outcome);
+                    self.flush_middle_click_paste(
+                        &mut outcome,
+                        crate::platform::read_clipboard_text,
+                    );
+                }
                 RawInputEvent::OuterFocusGained => {
                     self.outer_focused = Some(true);
                     outcome.query_host_appearance = true;

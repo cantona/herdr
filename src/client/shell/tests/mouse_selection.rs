@@ -1159,3 +1159,116 @@ fn context_menu_keyboard_and_outside_click_are_client_owned() {
     assert!(outside.repaint);
     assert!(state.overlay.is_none());
 }
+
+fn middle_click_state(middle_click_paste: bool) -> (ClientShellState, PaneHit) {
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.middle_click_paste = middle_click_paste;
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snapshot()));
+    let mut pane_surface = surface();
+    pane_surface.panes[0].mouse_reporting = true;
+    state.set_pane_surface(pane_surface);
+    state.compose(106, 20).expect("composed frame");
+    let pane = state.hits.panes[0].clone();
+    (state, pane)
+}
+
+fn middle_button(kind: MouseEventKind, pane: &PaneHit) -> crossterm::event::MouseEvent {
+    crossterm::event::MouseEvent {
+        kind,
+        column: pane.inner_rect.x + 2,
+        row: pane.inner_rect.y + 1,
+        modifiers: KeyModifiers::empty(),
+    }
+}
+
+#[test]
+fn middle_click_paste_records_the_clicked_pane_without_forwarding_the_click() {
+    let (mut state, pane) = middle_click_state(true);
+    let mut outcome = ClientShellInput::default();
+
+    state.handle_mouse(
+        middle_button(MouseEventKind::Down(MouseButton::Middle), &pane),
+        &mut outcome,
+    );
+    state.handle_mouse(
+        middle_button(MouseEventKind::Up(MouseButton::Middle), &pane),
+        &mut outcome,
+    );
+
+    assert!(
+        outcome.requests.is_empty(),
+        "a swallowed middle click must not reach a pane that tracks buttons"
+    );
+    assert_eq!(
+        state.pending_middle_click_paste,
+        Some(ClientInputTarget::Pane("pane_1".into())),
+        "the click pins the pane it landed on"
+    );
+
+    state.flush_middle_click_paste(&mut outcome, || Some("alpha".to_owned()));
+    let [ClientMessage::ClientShellPaneInput { pane_id, events }] = &outcome.requests[..] else {
+        panic!("the clipboard text should be pasted into the clicked pane");
+    };
+    assert_eq!(pane_id, "pane_1");
+    assert!(matches!(&events[..], [ClientPaneInputEvent::Paste(text)] if text == "alpha"));
+    assert!(state.pending_middle_click_paste.is_none());
+}
+
+#[test]
+fn middle_click_paste_skips_an_empty_clipboard() {
+    let (mut state, pane) = middle_click_state(true);
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(
+        middle_button(MouseEventKind::Up(MouseButton::Middle), &pane),
+        &mut outcome,
+    );
+
+    state.flush_middle_click_paste(&mut outcome, || None);
+
+    assert!(outcome.requests.is_empty());
+    assert!(state.pending_middle_click_paste.is_none());
+}
+
+#[test]
+fn middle_click_reaches_the_pane_when_paste_is_disabled() {
+    let (mut state, pane) = middle_click_state(false);
+    let mut outcome = ClientShellInput::default();
+
+    state.handle_mouse(
+        middle_button(MouseEventKind::Down(MouseButton::Middle), &pane),
+        &mut outcome,
+    );
+
+    assert!(state.pending_middle_click_paste.is_none());
+    let [ClientMessage::ClientShellPaneInput { pane_id, events }] = &outcome.requests[..] else {
+        panic!("the default keeps forwarding middle clicks to the program");
+    };
+    assert_eq!(pane_id, "pane_1");
+    assert!(matches!(
+        &events[..],
+        [ClientPaneInputEvent::Mouse {
+            kind: crate::protocol::ClientMouseKind::Down(
+                crate::protocol::ClientMouseButton::Middle
+            ),
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn middle_click_paste_is_not_armed_outside_terminal_mode() {
+    let (mut state, pane) = middle_click_state(true);
+    state.mode = ClientShellMode::Prefix;
+    let mut outcome = ClientShellInput::default();
+
+    state.handle_mouse(
+        middle_button(MouseEventKind::Up(MouseButton::Middle), &pane),
+        &mut outcome,
+    );
+
+    assert!(
+        state.pending_middle_click_paste.is_none(),
+        "a middle click must not inject text while a mode or overlay owns the keyboard"
+    );
+}

@@ -912,6 +912,12 @@
           "description": "Automatically copy text selected by mouse drag or double-click. When disabled, Ctrl+C or a host-forwarded Cmd+C copies and clears the retained selection."
         },
         {
+          "key": "ui.middle_click_paste",
+          "type": "boolean",
+          "default": "false",
+          "description": "Paste the clipboard into the pane under the cursor on middle click instead of forwarding the click to the program. The clipboard is read when the click is handled, so an unresponsive clipboard owner stalls the client until the read returns."
+        },
+        {
           "key": "ui.host_cursor",
           "type": "enum",
           "default": "auto",

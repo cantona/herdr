@@ -41,6 +41,7 @@ pub(crate) struct ClientShellConfig {
     pub(super) prompt_new_tab_name: bool,
     pub(super) prompt_new_workspace_name: bool,
     pub(super) prefix_overlay: bool,
+    pub(super) middle_click_paste: bool,
     pub(super) confirm_close: bool,
     pub(super) mouse_capture: bool,
     pub(super) mouse_scroll_lines: usize,
@@ -882,6 +883,9 @@ pub(crate) struct ClientShellState {
     pub(super) overlay: Option<ClientShellOverlay>,
     pub(super) previous_pane_id: Option<String>,
     pub(super) pane_mouse_gesture: Option<ClientPaneMouseGesture>,
+    /// Pane a middle click asked to paste into, served once the input batch is handled
+    /// (see `ui.middle_click_paste`).
+    pub(super) pending_middle_click_paste: Option<ClientInputTarget>,
     pub(super) link_hover: Option<super::link_hover::LinkHover>,
     pub(super) url_click_consumes_until_up: bool,
     pub(super) replaying_url_click: bool,
@@ -1044,6 +1048,7 @@ impl ClientShellState {
             overlay,
             previous_pane_id: None,
             pane_mouse_gesture: None,
+            pending_middle_click_paste: None,
             link_hover: None,
             url_click_consumes_until_up: false,
             replaying_url_click: false,
