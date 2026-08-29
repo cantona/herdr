@@ -1018,6 +1018,12 @@
           "description": "Keep split panes visually separated instead of sharing divider borders."
         },
         {
+          "key": "ui.bold_is_bright",
+          "type": "boolean",
+          "default": "false",
+          "description": "Render bold text that uses one of the 8 base ANSI colours with that colour’s bright variant, as most terminals do. Palette overrides for the bright entry still apply."
+        },
+        {
           "key": "ui.show_agent_labels_on_pane_borders",
           "type": "boolean",
           "default": "false",

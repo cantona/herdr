@@ -3278,7 +3278,21 @@ fn ghostty_cell_style(
     let mut fg = basic
         .style
         .fg_color
-        .map(|color| ghostty_cell_color(color, palette_overrides))
+        .map(|color| {
+            // Most terminals draw bold + one of the 8 base colours with that
+            // colour's bright variant; ghostty renders SGR literally. Promote
+            // the index before it is resolved so a host palette override for
+            // the bright entry is still honoured.
+            let color = match color {
+                crate::ghostty::CellColor::Palette(index)
+                    if basic.style.bold && crate::bold_is_bright::is_enabled() =>
+                {
+                    crate::ghostty::CellColor::Palette(crate::bold_is_bright::brighten_index(index))
+                }
+                other => other,
+            };
+            ghostty_cell_color(color, palette_overrides)
+        })
         .or_else(|| cells.fg_color().ok().flatten().map(ghostty_color))
         .or(default_fg);
     let mut bg = cells
@@ -6311,6 +6325,54 @@ mod tests {
         assert_eq!(buffer[(4, 0)].style().bg, Some(Color::Indexed(4)));
         assert_eq!(buffer[(6, 0)].symbol(), "T");
         assert_eq!(buffer[(6, 0)].style().fg, Some(Color::Rgb(1, 2, 3)));
+    }
+
+    #[test]
+    fn render_promotes_bold_base_colors_only_when_bold_is_bright_is_enabled() {
+        let render = |enabled: bool| {
+            let was_enabled = crate::bold_is_bright::is_enabled();
+            crate::bold_is_bright::set_enabled(enabled);
+            let (tx, _rx) = mpsc::channel(4);
+            let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+            let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+            {
+                let mut core = pane.core.lock().unwrap();
+                core.terminal.write(
+                    b"\x1b[1;34mB\x1b[0m \x1b[34mN\x1b[0m \x1b[1;94mH\x1b[0m \x1b[1;38;5;171mI\x1b[0m",
+                );
+            }
+            let backend = ratatui::backend::TestBackend::new(20, 5);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let fg = |x: u16| buffer[(x, 0)].style().fg;
+            let colors = (fg(0), fg(2), fg(4), fg(6));
+            crate::bold_is_bright::set_enabled(was_enabled);
+            colors
+        };
+
+        assert_eq!(
+            render(false),
+            (
+                Some(Color::Indexed(4)),
+                Some(Color::Indexed(4)),
+                Some(Color::Indexed(12)),
+                Some(Color::Indexed(171)),
+            ),
+            "disabled: SGR is rendered literally"
+        );
+        assert_eq!(
+            render(true),
+            (
+                Some(Color::Indexed(12)),
+                Some(Color::Indexed(4)),
+                Some(Color::Indexed(12)),
+                Some(Color::Indexed(171)),
+            ),
+            "enabled: only bold + base colour is promoted; plain, bright and 256-colour stay"
+        );
     }
 
     #[test]
