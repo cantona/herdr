@@ -15,6 +15,7 @@ mod agent_resume;
 mod agent_view_eval;
 mod api;
 mod app;
+mod bold_is_bright;
 mod build_info;
 mod checksum;
 mod cli;
@@ -323,6 +324,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Keep split panes visually separated instead of sharing divider borders.
 # pane_gaps = true
+
+# Render bold text in one of the 8 base ANSI colours with that colour's bright
+# variant, as most terminals do.
+# bold_is_bright = false
 
 # Show detected/reported agent labels in split pane borders when no manual pane name is set.
 # show_agent_labels_on_pane_borders = false

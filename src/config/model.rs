@@ -968,6 +968,9 @@ pub struct UiConfig {
     pub prompt_new_workspace_name: bool,
     /// Show the prefix key overlay after pressing the prefix. Default: true.
     pub prefix_overlay: bool,
+    /// Render bold text using one of the 8 base ANSI colours with that
+    /// colour's bright variant, as most terminals do. Default: false.
+    pub bold_is_bright: bool,
     /// Also copy into the X/Wayland PRIMARY selection, so other apps can
     /// paste it with middle click. Default: false.
     pub copy_to_primary: bool,
@@ -1225,6 +1228,7 @@ impl Default for UiConfig {
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             prefix_overlay: true,
+            bold_is_bright: false,
             copy_to_primary: false,
             keep_selection_after_copy: false,
             middle_click_paste: false,
