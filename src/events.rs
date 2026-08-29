@@ -137,6 +137,10 @@ pub enum AppEvent {
     /// A pane child emitted a valid OSC 52 clipboard write. The main loop
     /// re-emits it through herdr's own clipboard writer.
     ClipboardWrite { content: Vec<u8> },
+    /// Selection text read for a middle click (see `ui.middle_click_paste`).
+    /// Reading the selection shells out to a helper that waits on the owning
+    /// application, so it happens off the input path and lands here instead.
+    MiddleClickPaste { pane_id: PaneId, text: String },
     /// Prefix-mode ASCII input-source request, emitted on entering/leaving the ASCII input
     /// realm. The foreground process applies the host-local TIS switch (`active = true`) /
     /// restore (`active = false`): the client in server mode (via server forwarding), the

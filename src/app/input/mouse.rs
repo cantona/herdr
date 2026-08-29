@@ -930,7 +930,17 @@ impl AppState {
             MouseEventKind::Up(MouseButton::Middle) | MouseEventKind::Drag(MouseButton::Middle)
                 if !in_sidebar =>
             {
-                if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
+                if self.middle_click_paste && self.mode == Mode::Terminal {
+                    // Swallow drag AND release so a pane using button-event
+                    // tracking never sees half a gesture. Only the request is
+                    // recorded; both callers of handle_mouse start the read.
+                    if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Middle)) {
+                        if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row) {
+                            self.pending_middle_click_paste = Some(info.id);
+                        }
+                    }
+                } else if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned()
+                {
                     let _ = self.forward_pane_mouse_button(terminal_runtimes, &info, mouse);
                 }
             }
@@ -2663,6 +2673,75 @@ mod tests {
 
         assert_eq!(app.state.mode, Mode::ContextMenu);
         assert!(app.state.context_menu.is_some());
+    }
+
+    fn app_with_mouse_tracking_pane() -> (
+        crate::app::App,
+        crate::layout::PaneId,
+        Rect,
+        tokio::sync::mpsc::Receiver<Bytes>,
+    ) {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        let (runtime, input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                0,
+                b"\x1b[?1002h\x1b[?1006h",
+                4,
+            );
+        ws.insert_test_runtime(pane_id, runtime);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        (app, pane_id, info.inner_rect, input_rx)
+    }
+
+    #[tokio::test]
+    async fn middle_click_paste_records_the_clicked_pane_without_forwarding_the_click() {
+        let (mut app, pane_id, inner, mut input_rx) = app_with_mouse_tracking_pane();
+        app.state.middle_click_paste = true;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Middle),
+            inner.x + 2,
+            inner.y + 3,
+        ));
+
+        assert_eq!(
+            app.state.pending_middle_click_paste,
+            Some(pane_id),
+            "the click pins the pane it landed on, not the focused one"
+        );
+        assert!(
+            input_rx.try_recv().is_err(),
+            "a swallowed middle click must not reach a pane that tracks buttons"
+        );
+    }
+
+    #[tokio::test]
+    async fn middle_click_reaches_the_pane_when_paste_is_disabled() {
+        let (mut app, _pane_id, inner, mut input_rx) = app_with_mouse_tracking_pane();
+        app.state.middle_click_paste = false;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Middle),
+            inner.x + 2,
+            inner.y + 3,
+        ));
+
+        assert!(app.state.pending_middle_click_paste.is_none());
+        assert!(
+            input_rx.try_recv().is_ok(),
+            "the default keeps forwarding middle clicks to the program"
+        );
     }
 
     #[tokio::test]

@@ -879,6 +879,9 @@ pub struct UiConfig {
     pub prompt_new_workspace_name: bool,
     /// Show the prefix key overlay after pressing the prefix. Default: true.
     pub prefix_overlay: bool,
+    /// Paste the clipboard into the focused pane on middle click instead of
+    /// forwarding the click to the program. Default: false.
+    pub middle_click_paste: bool,
     /// Draw borders around split panes. Default: true.
     pub pane_borders: bool,
     /// Draw borders along the outside edge of the pane area. Default: true.
@@ -1119,6 +1122,7 @@ impl Default for UiConfig {
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             prefix_overlay: true,
+            middle_click_paste: false,
             pane_borders: true,
             pane_outer_borders: true,
             pane_scrollbars: true,

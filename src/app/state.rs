@@ -1546,6 +1546,12 @@ pub struct AppState {
     pub confirm_close: bool,
     pub prompt_new_tab_name: bool,
     pub prefix_overlay: bool,
+    pub middle_click_paste: bool,
+    /// Pane a middle click asked to paste into, drained by both input paths.
+    /// Only the request is recorded here: reading the selection blocks on a
+    /// helper process, so it happens off the input path. The pane is pinned
+    /// because focus can move before the text arrives.
+    pub pending_middle_click_paste: Option<crate::layout::PaneId>,
     pub prompt_new_workspace_name: bool,
     pub pane_borders: bool,
     pub pane_outer_borders: bool,
@@ -1939,6 +1945,8 @@ impl AppState {
             confirm_close: true,
             prompt_new_tab_name: true,
             prefix_overlay: true,
+            middle_click_paste: false,
+            pending_middle_click_paste: None,
             prompt_new_workspace_name: false,
             pane_borders: true,
             pane_outer_borders: true,

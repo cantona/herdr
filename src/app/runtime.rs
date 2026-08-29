@@ -238,6 +238,7 @@ impl App {
                     self.state
                         .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
                 }
+                self.start_pending_middle_click_paste();
                 changes_view
             }
             crate::raw_input::RawInputEvent::OuterFocusGained => {
