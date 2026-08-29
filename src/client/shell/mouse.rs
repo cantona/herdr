@@ -916,6 +916,12 @@ impl ClientShellState {
         if let Some(hit) = self.hits.popup.clone() {
             if super::contains(hit.inner_rect, point) {
                 match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Middle)
+                        if self.middle_click_paste_armed() => {}
+                    MouseEventKind::Up(MouseButton::Middle) if self.middle_click_paste_armed() => {
+                        self.pending_middle_click_paste =
+                            Some(ClientInputTarget::Popup(hit.pane_id.clone()));
+                    }
                     MouseEventKind::Down(button) => {
                         self.push_pane_mouse_event(&hit, mouse, mouse.modifiers, outcome);
                         if hit.mouse_reporting {
@@ -2277,6 +2283,21 @@ impl ClientShellState {
                     );
                 }
             }
+            // Swallow the whole middle gesture: a pane using button-event tracking must not see
+            // the press without its release. The release records the pane under the cursor,
+            // not the focused one; flush_middle_click_paste serves it.
+            MouseEventKind::Down(MouseButton::Middle) if self.middle_click_paste_armed() => {}
+            MouseEventKind::Up(MouseButton::Middle) if self.middle_click_paste_armed() => {
+                if let Some(hit) = self
+                    .hits
+                    .panes
+                    .iter()
+                    .find(|hit| super::contains(hit.inner_rect, point))
+                {
+                    self.pending_middle_click_paste =
+                        Some(ClientInputTarget::Pane(hit.pane_id.clone()));
+                }
+            }
             MouseEventKind::Down(MouseButton::Middle) => {
                 if let Some(hit) = self
                     .hits
@@ -2332,6 +2353,36 @@ impl ClientShellState {
             }
             _ => {}
         }
+    }
+
+    /// `ui.middle_click_paste` applies to the plain terminal view only, so a middle click can
+    /// never inject text into a modal text field.
+    fn middle_click_paste_armed(&self) -> bool {
+        self.config.middle_click_paste
+            && self.mode == ClientShellMode::Terminal
+            && self.overlay.is_none()
+    }
+
+    /// Serve the paste a middle click asked for (see `ui.middle_click_paste`).
+    ///
+    /// The click only records its target. The clipboard is read here, right after the mouse
+    /// event that armed it has been handled, so `handle_mouse` stays free of process spawns
+    /// and a test can supply the text. The read is synchronous on the client loop, like the
+    /// modal paste shortcut, so an unresponsive selection owner stalls the client until the
+    /// helper returns. Draining right after the event also means the request can never be
+    /// served from a later, unrelated one.
+    pub(super) fn flush_middle_click_paste(
+        &mut self,
+        outcome: &mut ClientShellInput,
+        read_clipboard_text: impl FnOnce() -> Option<String>,
+    ) {
+        let Some(target) = self.pending_middle_click_paste.take() else {
+            return;
+        };
+        let Some(text) = read_clipboard_text().filter(|text| !text.is_empty()) else {
+            return;
+        };
+        super::push_target_event(target, ClientPaneInputEvent::Paste(text), outcome);
     }
 
     fn pane_mouse_position(&self, hit: &PaneHit, mouse: MouseEvent) -> ClientMousePosition {
