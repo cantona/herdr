@@ -43,7 +43,7 @@ impl App {
             return false;
         }
 
-        self.state.copy_selection(&self.terminal_runtimes);
+        self.state.copy_selection_clearing(&self.terminal_runtimes);
         self.selection_autoscroll_deadline = None;
         if !self.dispatch_pending_clipboard_write() {
             return false;
@@ -128,6 +128,30 @@ mod tests {
             .selection
             .as_ref()
             .is_some_and(crate::selection::Selection::is_visible));
+    }
+
+    #[tokio::test]
+    async fn keep_selection_after_copy_leaves_the_drag_highlight_visible() {
+        let (mut app, info, _input_rx) = app_with_screen_bytes_and_input(b"alpha beta");
+        app.state.copy_on_select = true;
+        app.state.keep_selection_after_copy = true;
+
+        drag_select_range(&mut app, &info, 0, 4);
+
+        assert_eq!(clipboard_write_content(&mut app), b"alpha");
+        assert_visible_selection(&app);
+    }
+
+    #[tokio::test]
+    async fn copy_on_select_clears_the_drag_highlight_by_default() {
+        let (mut app, info, _input_rx) = app_with_screen_bytes_and_input(b"alpha beta");
+        app.state.copy_on_select = true;
+        app.state.keep_selection_after_copy = false;
+
+        drag_select_range(&mut app, &info, 0, 4);
+
+        assert_eq!(clipboard_write_content(&mut app), b"alpha");
+        assert!(app.state.selection.is_none());
     }
 
     #[tokio::test]

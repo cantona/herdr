@@ -664,6 +664,7 @@ impl App {
             confirm_close: config.ui.confirm_close,
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prefix_overlay: config.ui.prefix_overlay,
+            keep_selection_after_copy: config.ui.keep_selection_after_copy,
             middle_click_paste: config.ui.middle_click_paste,
             pending_middle_click_paste: None,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
@@ -1513,6 +1514,7 @@ impl App {
                 self.state.confirm_close = config.ui.confirm_close;
                 self.state.prompt_new_tab_name = config.ui.prompt_new_tab_name;
                 self.state.prefix_overlay = config.ui.prefix_overlay;
+                self.state.keep_selection_after_copy = config.ui.keep_selection_after_copy;
                 self.state.middle_click_paste = config.ui.middle_click_paste;
                 self.state.prompt_new_workspace_name = config.ui.prompt_new_workspace_name;
                 self.state.pane_borders = config.ui.pane_borders;
