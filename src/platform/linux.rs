@@ -1118,13 +1118,15 @@ fn read_clipboard_text_commands() -> Vec<ClipboardCommand> {
     let mut commands = Vec::new();
 
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        // wl-paste appends a newline to text unless told not to; pasted into a
+        // terminal pane that newline is an Enter keypress.
         commands.push(ClipboardCommand {
             program: "wl-paste",
-            args: &["--type", "text/plain;charset=utf-8"],
+            args: &["--no-newline", "--type", "text/plain;charset=utf-8"],
         });
         commands.push(ClipboardCommand {
             program: "wl-paste",
-            args: &["--type", "text/plain"],
+            args: &["--no-newline", "--type", "text/plain"],
         });
     }
 
@@ -2250,6 +2252,10 @@ mod tests {
         assert_eq!(commands[1].program, "wl-paste");
         assert_eq!(commands[2].program, "xclip");
         assert_eq!(commands[3].program, "xsel");
+        assert!(commands
+            .iter()
+            .filter(|command| command.program == "wl-paste")
+            .all(|command| command.args.contains(&"--no-newline")));
     }
 
     #[test]
