@@ -91,6 +91,36 @@ pub(super) fn ghostty_mouse_encoder_for_terminal(
     Some(encoder)
 }
 
+/// A pane in SGR pixel mode (1016) reads every report as pixels. A cell
+/// position still reaches it when the host terminal reports only cells, so
+/// stand in the centre of that cell; forwarding the cell numbers would land
+/// the event a few pixels from the top-left corner. Without pixel geometry
+/// there is nothing to convert with, so the cell report goes out unchanged.
+pub(super) fn ghostty_mouse_report_position(
+    terminal: &crate::ghostty::Terminal,
+    position: crate::input::mouse::Position,
+) -> Option<crate::input::mouse::Position> {
+    let crate::input::mouse::Position::Cell { column, row } = position else {
+        return Some(position);
+    };
+    if !terminal
+        .mode_get(crate::ghostty::MODE_MOUSE_SGR_PIXELS)
+        .ok()?
+    {
+        return Some(position);
+    }
+    let cols = terminal.cols().ok()? as u32;
+    let rows = terminal.rows().ok()? as u32;
+    let width_px = terminal.width_px().ok()?;
+    let height_px = terminal.height_px().ok()?;
+    Some(
+        match crate::input::mouse::cell_center(cols, rows, width_px, height_px, column, row) {
+            Some((x, y)) => crate::input::mouse::Position::Pixels { x, y },
+            None => position,
+        },
+    )
+}
+
 pub(super) fn ghostty_mouse_position_for_terminal(
     position: crate::input::mouse::Position,
 ) -> Option<(f32, f32)> {

@@ -162,6 +162,33 @@ fn parse_number(value: &[u8]) -> Option<u32> {
         .flatten()
 }
 
+/// The 1-based pixel position at the centre of a cell on a grid whose cell
+/// pitch is `extent / count`, the pitch the pane mouse encoder reports to its
+/// application. None when the grid has no pixel geometry or the cell is off it.
+pub(crate) fn cell_center(
+    cols: u32,
+    rows: u32,
+    width_px: u32,
+    height_px: u32,
+    column: u16,
+    row: u16,
+) -> Option<(u32, u32)> {
+    let column = u32::from(column);
+    let row = u32::from(row);
+    if cols == 0 || rows == 0 || column >= cols || row >= rows {
+        return None;
+    }
+    let cell_width = width_px / cols;
+    let cell_height = height_px / rows;
+    if cell_width == 0 || cell_height == 0 {
+        return None;
+    }
+    Some((
+        column * cell_width + cell_width / 2 + 1,
+        row * cell_height + cell_height / 2 + 1,
+    ))
+}
+
 fn boundary(index: u16, count: u16, extent: u32) -> Option<u32> {
     (count > 0 && index <= count && extent > 0)
         .then(|| (u64::from(index) * u64::from(extent) / u64::from(count)) as u32)
@@ -200,6 +227,23 @@ mod tests {
         ] {
             assert_eq!(parse_report(input), expected);
         }
+    }
+
+    #[test]
+    fn cell_center_lands_inside_its_own_cell() {
+        let geometry = HostGeometry::new(127, 31, 1_276, 626).unwrap();
+        for (column, row) in [(0, 0), (21, 0), (22, 3), (126, 30)] {
+            let (x, y) = cell_center(127, 31, 1_276, 626, column, row).unwrap();
+            assert_eq!(
+                geometry.cell(x, y),
+                Some((column, row)),
+                "cell {column},{row}"
+            );
+        }
+        assert_eq!(cell_center(80, 24, 800, 480, 4, 6), Some((46, 131)));
+        assert_eq!(cell_center(80, 24, 800, 480, 80, 0), None);
+        assert_eq!(cell_center(80, 24, 0, 480, 0, 0), None);
+        assert_eq!(cell_center(80, 24, 79, 480, 0, 0), None);
     }
 
     #[test]

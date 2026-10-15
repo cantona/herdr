@@ -28,7 +28,7 @@ use super::{
         ghostty_key_event_from_terminal_key, ghostty_mouse_encoder_for_terminal,
         ghostty_mouse_event_from_button_kind, ghostty_mouse_event_from_motion_kind,
         ghostty_mouse_event_from_wheel_kind, ghostty_mouse_position_for_terminal,
-        ghostty_prefers_herdr_text_encoding,
+        ghostty_mouse_report_position, ghostty_prefers_herdr_text_encoding,
     },
     kitty_keyboard::KittyKeyboardTracker,
     osc::{
@@ -2155,6 +2155,7 @@ impl GhosttyPaneTerminal {
         if require_any_motion && !core.terminal.mode_get(MODE_MOUSE_ANY_MOTION).ok()? {
             return None;
         }
+        let position = ghostty_mouse_report_position(&core.terminal, position)?;
         let mut encoder = ghostty_mouse_encoder_for_terminal(&core.terminal, position)?;
         let (x, y) = ghostty_mouse_position_for_terminal(position)?;
         event.set_position(x, y);
@@ -5497,7 +5498,7 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_mouse_sgr_pixels_preserves_exact_and_downgrades_cell_input() {
+    fn ghostty_mouse_sgr_pixels_preserves_exact_and_centres_cell_input() {
         let (tx, _rx) = mpsc::channel(4);
         let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         terminal.resize(80, 24, 10, 20).unwrap();
@@ -5509,14 +5510,31 @@ mod tests {
             crate::input::mouse::Position::Pixels { x: 48, y: 139 },
             crossterm::event::KeyModifiers::empty(),
         );
-        let fallback = pane.encode_mouse_motion(
+        let centred = pane.encode_mouse_motion(
             crossterm::event::MouseEventKind::Moved,
             crate::input::mouse::Position::Cell { column: 4, row: 6 },
             crossterm::event::KeyModifiers::empty(),
         );
 
         assert_eq!(exact.as_deref(), Some(&b"\x1b[<35;48;139M"[..]));
-        assert_eq!(fallback.as_deref(), Some(&b"\x1b[<35;5;7M"[..]));
+        // a host that only reports cells still puts the pointer inside cell (4, 6)
+        assert_eq!(centred.as_deref(), Some(&b"\x1b[<35;46;131M"[..]));
+    }
+
+    #[test]
+    fn ghostty_mouse_sgr_pixels_without_pixel_geometry_keeps_cell_reports() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[?1003h\x1b[?1006h\x1b[?1016h");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let report = pane.encode_mouse_button(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crate::input::mouse::Position::Cell { column: 4, row: 6 },
+            crossterm::event::KeyModifiers::empty(),
+        );
+
+        assert_eq!(report.as_deref(), Some(&b"\x1b[<0;5;7M"[..]));
     }
 
     #[test]
