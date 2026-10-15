@@ -499,8 +499,9 @@ fn direct_attach_mouse_capture_combines_local_preference_with_child_demand() {
     assert!(effective_mouse_capture(false, true));
     assert!(effective_mouse_capture(true, false));
     assert!(!effective_mouse_capture(false, false));
-    assert!(effective_sgr_pixel_mouse(true, true, true));
-    assert!(!effective_sgr_pixel_mouse(true, true, false));
+    assert!(effective_sgr_pixel_mouse(true, true, true, true));
+    assert!(!effective_sgr_pixel_mouse(true, true, false, true));
+    assert!(!effective_sgr_pixel_mouse(true, true, true, false));
 }
 
 #[test]

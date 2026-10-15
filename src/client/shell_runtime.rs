@@ -116,7 +116,12 @@ pub(super) fn clear_endpoint_host_effects(
     } else {
         state.direct_mouse_capture_preference
     };
-    let sgr_pixels = super::effective_sgr_pixel_mouse(enabled, false, state.pixel_geometry_exact);
+    let sgr_pixels = super::effective_sgr_pixel_mouse(
+        enabled,
+        false,
+        state.pixel_geometry_exact,
+        state.host_sgr_pixel_mouse_supported,
+    );
     if enabled != state.mouse_capture_active
         || sgr_pixels != host_sgr_pixels_active.load(std::sync::atomic::Ordering::Acquire)
     {

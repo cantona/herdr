@@ -11,6 +11,8 @@ pub(super) struct ClientLoopConfig {
     pub(super) pixel_geometry_fallback: bool,
     pub(super) mouse_capture_active: bool,
     pub(super) host_escape_disambiguation_active: bool,
+    /// The host terminal answered DECRQM for mode 1016, so it can report mouse pixels.
+    pub(super) host_sgr_pixel_mouse_supported: bool,
     pub(super) initial_host_input: Vec<u8>,
     pub(super) endpoint_keybindings: bool,
     pub(super) remote_image_paste_key:

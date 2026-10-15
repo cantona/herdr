@@ -188,6 +188,9 @@ pub(super) fn do_handshake(
             cell_width_px,
             cell_height_px,
             surface_size,
+            // Claims the client could report pixels; whether the host terminal
+            // actually does is probed after this handshake and gates mode 1016
+            // (see `TerminalGuard::host_sgr_pixel_mouse_supported`).
             pixel_mouse: exact_cell_size && cfg!(unix),
             direct_graphics: direct_graphics_capability(
                 local_transport,
