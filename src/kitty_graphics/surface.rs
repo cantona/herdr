@@ -7,7 +7,7 @@ use super::output::GraphicsOutput;
 use ratatui::layout::Rect;
 
 use super::{
-    clipped_placement, collect_visible_placements, encode_graphics_output, HostCellSize,
+    clipped_placement, collect_visible_placements, encode_graphics_output_retiring, HostCellSize,
     HostGraphicsCache, HostPlacement, HostSourceKey, ImageSignature,
 };
 use crate::ghostty::{
@@ -237,6 +237,21 @@ impl ClientState {
         host_image_id(&self.scope, key)
     }
 
+    /// A new inline revision takes the inline bank its source is not showing,
+    /// so the host places it before the old image is deleted.
+    fn inline_terminal_image_id(&self, key: &SurfaceGraphicsAssetKey) -> u32 {
+        let bank = inline_host_image_id(&self.scope, key);
+        let source = HostSourceKey::ClientSurface {
+            scope: self.scope.clone(),
+            source: key.source.clone(),
+        };
+        if self.host.sources.get(&source) == Some(&bank) {
+            bank ^ INLINE_BANK_BIT
+        } else {
+            bank
+        }
+    }
+
     pub(crate) fn scope(&self) -> &str {
         &self.scope
     }
@@ -366,6 +381,12 @@ impl ClientState {
             .collect::<HashSet<_>>();
         for asset in std::mem::take(&mut scene.assets) {
             if asset.data.len() as u64 == asset.key.data_len && placed.contains(&asset.key) {
+                if matches!(asset.key.source, SurfaceGraphicsSource::Terminal { .. })
+                    && !self.native_image_ids.contains_key(&asset.key)
+                {
+                    let image_id = self.inline_terminal_image_id(&asset.key);
+                    self.native_image_ids.insert(asset.key.clone(), image_id);
+                }
                 self.assets.insert(asset.key, Arc::from(asset.data));
             }
         }
@@ -486,23 +507,36 @@ impl ClientState {
         occlusion: &Occlusion,
     ) -> GraphicsOutput {
         let mut bytes = self.take_pending_cleanup();
-        self.stale_images.sort_unstable();
-        self.stale_images.dedup();
-        for image_id in self.stale_images.drain(..) {
-            if self.host.images.remove(&image_id).is_some() {
-                super::encode_delete_image(&mut bytes, image_id);
-            }
-            self.host.placements.retain(|(id, _), _| *id != image_id);
-            self.host.sources.retain(|_, id| *id != image_id);
-            self.host
-                .replayed_placements
-                .retain(|(id, _)| *id != image_id);
-        }
         if !cell_size.is_known() || self.scope.is_empty() {
+            self.stale_images.sort_unstable();
+            self.stale_images.dedup();
+            for image_id in self.stale_images.drain(..) {
+                self.host.retire_image(&mut bytes, image_id);
+            }
             bytes.extend(self.host.clear_bytes());
             return GraphicsOutput::from_bytes(bytes);
         }
 
+        let placements =
+            self.host_placements(visibility, main_origin, popup_origin, cell_size, occlusion);
+        let mut output = GraphicsOutput::from_bytes(bytes);
+        self.host.request_placement_replay();
+        output.extend(encode_graphics_output_retiring(
+            &mut self.host,
+            &placements,
+            std::mem::take(&mut self.stale_images),
+        ));
+        output
+    }
+
+    fn host_placements(
+        &self,
+        visibility: Visibility,
+        main_origin: (u16, u16),
+        popup_origin: Option<(u16, u16)>,
+        cell_size: HostCellSize,
+        occlusion: &Occlusion,
+    ) -> Vec<HostPlacement> {
         let visible = self
             .display_scene
             .placements
@@ -513,30 +547,25 @@ impl ClientState {
             })
             .collect::<Vec<_>>();
         let pieces = occlusion.frame_pieces(&visible);
-        let this = &*self;
-        let placements = visible
+        visible
             .iter()
             .zip(pieces)
             .flat_map(|(&(placement, origin), pieces)| {
                 pieces.into_iter().enumerate().map(move |(index, piece)| {
                     let mut host = client_host_piece(
-                        &this.scope,
+                        &self.scope,
                         placement,
                         origin,
                         cell_size,
                         piece,
                         index as u32,
                     );
-                    host.host_image_id = Some(this.image_id(&placement.asset));
-                    host.raw_data = this.assets.get(&placement.asset).map(Arc::clone);
+                    host.host_image_id = Some(self.image_id(&placement.asset));
+                    host.raw_data = self.assets.get(&placement.asset).map(Arc::clone);
                     host
                 })
             })
-            .collect::<Vec<_>>();
-        let mut output = GraphicsOutput::from_bytes(bytes);
-        self.host.request_placement_replay();
-        output.extend(encode_graphics_output(&mut self.host, &placements));
-        output
+            .collect()
     }
 }
 
@@ -549,6 +578,20 @@ pub(crate) fn native_host_image_id(scope: &str, key: &SurfaceGraphicsAssetKey) -
     key.source.hash(&mut hasher);
     // Keep native IDs separate from the direct API namespace.
     0x4000_0000 | (hasher.finish() as u32 & 0x1fff_ffff)
+}
+
+// Inline terminal revisions live in 0x2000_0000..0x4000_0000: native ids
+// always carry 0x4000_0000, the direct API stays below 2^20, and terminals
+// allocate implicit ids from 2^31. The server can never stage a native upload
+// into a bank an inline image occupies. The range holds two banks of 2^28, so
+// an inline id keeps 28 hash bits where a native id keeps 29: two inline
+// sources share an id pair (and show each other's pixels, as colliding native
+// sources do) at 2^-28 per pair instead of 2^-29.
+const INLINE_IMAGE_ID_BASE: u32 = 0x2000_0000;
+const INLINE_BANK_BIT: u32 = 1 << 28;
+
+fn inline_host_image_id(scope: &str, key: &SurfaceGraphicsAssetKey) -> u32 {
+    INLINE_IMAGE_ID_BASE | (native_host_image_id(scope, key) & (INLINE_BANK_BIT - 1))
 }
 
 pub(crate) fn host_image_id(scope: &str, key: &SurfaceGraphicsAssetKey) -> u32 {
@@ -1190,8 +1233,108 @@ mod tests {
         assert!(bytes.contains("\u{1b}[7;13H"), "{bytes:?}");
     }
 
+    fn assert_swap(bytes: &str, new: u32, old: u32) {
+        let place = bytes
+            .find(&format!("a=p,i={new},"))
+            .unwrap_or_else(|| panic!("no placement of {new}: {bytes:?}"));
+        let delete = bytes
+            .find(&format!("a=d,d=I,i={old},"))
+            .unwrap_or_else(|| panic!("no delete of {old}: {bytes:?}"));
+        assert!(place < delete, "{bytes:?}");
+        assert_eq!(bytes.find("a=d,"), Some(delete), "{bytes:?}");
+        if let Some(upload) = bytes.find(&format!("i={new},q=2;")) {
+            assert!(upload < place, "{bytes:?}");
+        }
+    }
+
     #[test]
-    fn stable_ids_replace_native_pixels_and_delete_on_removal() {
+    fn fingerprint_replacement_places_before_deleting_through_encode_output() {
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        let layer = |fingerprint| {
+            let mut image = asset(
+                SurfaceGraphicsTarget::Pane {
+                    pane_id: "pane".into(),
+                },
+                fingerprint,
+                vec![fingerprint as u8, 2, 3, 255],
+            );
+            image.key.source = SurfaceGraphicsSource::PaneLayer {
+                pane_id: "pane".into(),
+                layer_id: "primary".into(),
+            };
+            image
+        };
+        let mut state = ClientState::default();
+        state.set_scope("layers");
+        let first = layer(1);
+        let old = state.image_id(&first.key);
+        state.set_scene(scene(first, 0, 0));
+        let _ = state.encode(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+
+        let second = layer(2);
+        let new = state.image_id(&second.key);
+        assert_ne!(new, old);
+        state.set_scene(scene(second, 0, 0));
+        let bytes = String::from_utf8(state.encode(
+            Visibility::Main,
+            (0, 0),
+            None,
+            cell,
+            &Occlusion::default(),
+        ))
+        .unwrap();
+        let upload = bytes
+            .find(&format!("a=t,t=d,f=32,s=1,v=1,i={new},"))
+            .unwrap();
+        assert!(upload < bytes.find(&format!("a=p,i={new},")).unwrap());
+        assert_swap(&bytes, new, old);
+        assert_eq!(state.host.images.keys().copied().collect::<Vec<_>>(), [new]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_slot_swap_places_before_deleting_through_encode_output() {
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        let target = SurfaceGraphicsTarget::Pane {
+            pane_id: "pane".into(),
+        };
+        let native = |fingerprint| {
+            let mut image = asset(target.clone(), fingerprint, vec![1, 2, 3, 255]);
+            image.data.clear();
+            image
+        };
+        let mut state = ClientState::default();
+        state.set_scope("native");
+        // Consume the scope reset before trusting an upload.
+        let _ = state.encode(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+        let first = native(1);
+        let base = native_host_image_id(state.scope(), &first.key);
+        state.set_scene(scene(first.clone(), 0, 0));
+        assert!(state.trust_direct_asset(&first.key, base ^ NATIVE_SLOT_BIT));
+        let _ = state.encode(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+
+        let second = native(2);
+        state.set_scene(scene(second.clone(), 0, 0));
+        assert!(state.trust_direct_asset(&second.key, base));
+        let output =
+            state.encode_output(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+        let bytes = String::from_utf8(output.into_inline_bytes()).unwrap();
+        assert!(!bytes.contains("a=t,"), "{bytes:?}");
+        assert_swap(&bytes, base, base ^ NATIVE_SLOT_BIT);
+        assert_eq!(
+            state.host.images.keys().copied().collect::<Vec<_>>(),
+            [base]
+        );
+    }
+
+    #[test]
+    fn inline_revisions_alternate_ids_and_delete_on_removal() {
         use crate::kitty_graphics::GraphicsOperation;
         let mut state = ClientState::default();
         state.set_scope("stable-native");
@@ -1199,15 +1342,23 @@ mod tests {
             pane_id: "pane".into(),
         };
         let first = asset(target.clone(), 1, vec![1, 2, 3, 255]);
-        let id = state.image_id(&first.key);
+        let base = inline_host_image_id(state.scope(), &first.key);
+        assert_eq!(base & 0xe000_0000, INLINE_IMAGE_ID_BASE);
         let cell = HostCellSize {
             width_px: 8,
             height_px: 16,
         };
+        let mut id = base;
         for revision in 1..=8 {
+            let previous = id;
+            id = if revision % 2 == 1 {
+                base
+            } else {
+                base ^ INLINE_BANK_BIT
+            };
             let next = asset(target.clone(), revision, vec![revision as u8, 2, 3, 255]);
+            state.set_scene(scene(next.clone(), 0, 0));
             assert_eq!(state.image_id(&next.key), id);
-            state.set_scene(scene(next, 0, 0));
             let output =
                 state.encode_output(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
             let uploads = output
@@ -1223,12 +1374,16 @@ mod tests {
             assert_eq!(uploads[0].1.as_ref(), &[revision as u8, 2, 3, 255]);
             let bytes = String::from_utf8(output.into_inline_bytes()).unwrap();
             let upload = bytes.find("a=t,").unwrap();
-            let display = bytes.find("a=p,").unwrap();
+            let display = bytes.find(&format!("a=p,i={id},")).unwrap();
             assert!(upload < display);
             if revision > 1 {
-                assert!(bytes.find("a=d,d=I,").unwrap() < upload);
+                let delete = bytes.find(&format!("a=d,d=I,i={previous},")).unwrap();
+                assert!(display < delete, "{bytes:?}");
+                assert_eq!(bytes.find("a=d,"), Some(delete), "{bytes:?}");
+            } else {
+                assert!(!bytes.contains("a=d,"));
             }
-            assert_eq!(state.host.images.len(), 1);
+            assert_eq!(state.host.images.keys().copied().collect::<Vec<_>>(), [id]);
         }
         let mut other = first.key.clone();
         other.source = SurfaceGraphicsSource::Terminal {
@@ -1446,6 +1601,8 @@ mod tests {
         assert!(!rejected.contains(&format!("a=d,d=I,i={active},")));
         assert!(rejected.contains(&format!("a=p,i={active},")));
         state.set_scene(scene(next.clone(), 0, 0));
+        let inline = state.image_id(&next.key);
+        assert!(inline != base && inline != active);
         let fallback = String::from_utf8(state.encode(
             Visibility::Main,
             (0, 0),
@@ -1455,9 +1612,10 @@ mod tests {
         ))
         .unwrap();
         assert!(fallback.contains("a=t,"));
-        assert!(fallback.contains(&format!("a=p,i={base},")));
-        assert!(fallback.contains(&format!("a=d,d=I,i={active},")));
-        assert!(!state.accepts_direct_asset(&next.key, base));
+        let place = fallback.find(&format!("a=p,i={inline},")).unwrap();
+        assert!(place < fallback.find(&format!("a=d,d=I,i={active},")).unwrap());
+        // The inline fallback sits outside both native banks.
+        assert!(state.accepts_direct_asset(&next.key, base));
         next.key.data_fingerprint += 1;
         assert!(!state.accepts_direct_asset(&next.key, base));
         let mut moved = scene(next.clone(), 1, 0);
@@ -1471,7 +1629,7 @@ mod tests {
             &Occlusion::default(),
         ))
         .unwrap();
-        assert!(geometry.contains(&format!("a=d,d=I,i={base},")));
+        assert!(geometry.contains(&format!("a=d,d=I,i={inline},")));
         assert!(!geometry.contains("a=p,"));
         state.set_scene(SurfaceGraphicsScene::default());
         assert!(!state.trust_direct_asset(&next.key, active));
@@ -1577,7 +1735,7 @@ mod tests {
                 1,
                 vec![1, 2, 3, 4],
             );
-            let id = state.image_id(&image.key);
+            let mut id = state.image_id(&image.key);
             let mut graphics = scene(image.clone(), 0, 0);
             let mut second = graphics.placements[0].clone();
             second.logical_placement_id = 4;
@@ -1598,6 +1756,7 @@ mod tests {
                 );
             }
             state.set_scene(graphics);
+            id = state.image_id(&image.key);
             let cell = HostCellSize {
                 width_px: 8,
                 height_px: 16,
