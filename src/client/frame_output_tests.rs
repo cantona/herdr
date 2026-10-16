@@ -1,6 +1,7 @@
 use super::frame_output::*;
 use super::image_files::FileTransport;
 use crate::kitty_graphics::{GraphicsOperation, GraphicsOutput};
+use base64::Engine as _;
 use std::sync::Arc;
 
 fn output(format: u32) -> GraphicsOutput {
@@ -33,6 +34,7 @@ fn deferred_inline_output_matches_existing_frame_envelope() {
         encoded,
         &graphics,
         &mut FileTransport::default(),
+        UploadCompression::None,
     )
     .unwrap();
     assert_eq!(actual, expected);
@@ -55,6 +57,7 @@ fn native_swap_cleanup_and_placements_share_the_frame_sync_envelope() {
         b"\x1b[?2026hframe\x1b[?2026l",
         &graphics,
         &mut FileTransport::default(),
+        UploadCompression::None,
     )
     .unwrap();
     let text = std::str::from_utf8(&actual).unwrap();
@@ -84,9 +87,15 @@ fn deferred_output_propagates_write_failure() {
         }
     }
     assert_eq!(
-        write_composed_frame(Broken, b"text", &output(32), &mut FileTransport::default())
-            .unwrap_err()
-            .kind(),
+        write_composed_frame(
+            Broken,
+            b"text",
+            &output(32),
+            &mut FileTransport::default(),
+            UploadCompression::None
+        )
+        .unwrap_err()
+        .kind(),
         std::io::ErrorKind::BrokenPipe
     );
 }
@@ -94,7 +103,6 @@ fn deferred_output_propagates_write_failure() {
 #[cfg(unix)]
 mod local_files {
     use super::*;
-    use base64::Engine as _;
     use std::path::PathBuf;
     struct Scratch(PathBuf);
     impl Scratch {
@@ -143,19 +151,40 @@ mod local_files {
             let mut files = FileTransport::for_test(root.0.clone());
             let graphics = output(format);
             let mut first = Vec::new();
-            write_composed_frame(&mut first, b"text", &graphics, &mut files).unwrap();
+            write_composed_frame(
+                &mut first,
+                b"text",
+                &graphics,
+                &mut files,
+                UploadCompression::None,
+            )
+            .unwrap();
             let first_text = std::str::from_utf8(&first).unwrap();
             assert!(first_text.contains("a=q,t=t"));
             assert!(first_text.contains("a=t,t=d"));
             let probe = command_path(&first, "a=q,");
             assert_eq!(std::fs::read(&probe).unwrap().len(), 4);
             let mut waiting = Vec::new();
-            write_composed_frame(&mut waiting, b"text", &graphics, &mut files).unwrap();
+            write_composed_frame(
+                &mut waiting,
+                b"text",
+                &graphics,
+                &mut files,
+                UploadCompression::None,
+            )
+            .unwrap();
             assert!(!std::str::from_utf8(&waiting).unwrap().contains("a=q,"));
             assert!(std::str::from_utf8(&waiting).unwrap().contains("a=t,t=d"));
             std::fs::remove_file(&probe).unwrap();
             let mut ready = Vec::new();
-            write_composed_frame(&mut ready, b"text", &graphics, &mut files).unwrap();
+            write_composed_frame(
+                &mut ready,
+                b"text",
+                &graphics,
+                &mut files,
+                UploadCompression::None,
+            )
+            .unwrap();
             let text = std::str::from_utf8(&ready).unwrap();
             assert!(text.contains(&format!("before\x1b_Ga=t,t=t,f={format}")));
             assert!(text.contains("\x1b\\after"));
@@ -171,22 +200,182 @@ mod local_files {
         let root = Scratch::new();
         let mut files = FileTransport::for_test(root.0.clone());
         let mut unsupported = Vec::new();
-        write_composed_frame(&mut unsupported, b"", &output(999), &mut files).unwrap();
+        write_composed_frame(
+            &mut unsupported,
+            b"",
+            &output(999),
+            &mut files,
+            UploadCompression::None,
+        )
+        .unwrap();
         assert!(std::str::from_utf8(&unsupported)
             .unwrap()
             .contains("a=t,t=d,f=999"));
         assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
         let mut broken = FileTransport::for_test(root.0.join("absent"));
         let mut actual = Vec::new();
-        write_composed_frame(&mut actual, b"", &output(32), &mut broken).unwrap();
+        write_composed_frame(
+            &mut actual,
+            b"",
+            &output(32),
+            &mut broken,
+            UploadCompression::None,
+        )
+        .unwrap();
         let mut expected = Vec::new();
         write_composed_frame(
             &mut expected,
             b"",
             &output(32),
             &mut FileTransport::default(),
+            UploadCompression::None,
         )
         .unwrap();
         assert_eq!(actual, expected);
     }
+}
+
+fn upload_payload(frame: &[u8], control_prefix: &str) -> (String, Vec<u8>) {
+    let text = std::str::from_utf8(frame).unwrap();
+    let start = text.find(control_prefix).expect("upload control");
+    let mut control = None;
+    let mut payload = Vec::new();
+    for chunk in text[start..].split("\x1b\\") {
+        let chunk = chunk.strip_prefix("\x1b_G").unwrap_or(chunk);
+        let Some((keys, data)) = chunk.split_once(';') else {
+            break;
+        };
+        if control.is_none() {
+            control = Some(keys.to_owned());
+        } else if !keys.starts_with("m=") {
+            break;
+        }
+        payload.extend(
+            base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .expect("base64 chunk"),
+        );
+        if keys.ends_with("m=0") {
+            break;
+        }
+    }
+    (control.expect("control"), payload)
+}
+
+#[test]
+fn zlib_upload_deflates_raw_pixels_and_marks_the_control() {
+    let small: Vec<u8> = (0..3072 * 3 + 7).map(|i| (i % 5) as u8).collect();
+    // Larger than the sample, so the sampled decision has to say deflate:
+    // white rows with a dark glyph pixel every so often, like a text page.
+    let page: Vec<u8> = (0..DEFLATE_SAMPLE_SLICES * DEFLATE_SAMPLE_SLICE_BYTES * 4)
+        .map(|index| {
+            if index % 4 != 3 && index % 37 == 0 {
+                20
+            } else {
+                255
+            }
+        })
+        .collect();
+    assert!(page.len() > DEFLATE_SAMPLE_SLICES * DEFLATE_SAMPLE_SLICE_BYTES);
+    for (data, format) in [(&small, 24), (&small, 32), (&page, 32)] {
+        let graphics = GraphicsOutput {
+            operations: vec![GraphicsOperation::Upload {
+                control: format!("a=t,t=d,f={format},s=4,v=8,i=42,q=2"),
+                data: Arc::from(data.clone()),
+            }],
+        };
+        let mut actual = Vec::new();
+        write_composed_frame(
+            &mut actual,
+            b"text",
+            &graphics,
+            &mut FileTransport::default(),
+            UploadCompression::Zlib,
+        )
+        .unwrap();
+        let (control, payload) = upload_payload(&actual, "a=t,t=d,");
+        let chunked = if payload.len() > 3072 { 1 } else { 0 };
+        assert_eq!(
+            control,
+            format!("a=t,t=d,f={format},s=4,v=8,i=42,q=2,o=z,m={chunked}"),
+            "{} bytes",
+            data.len()
+        );
+        assert!(payload.len() < data.len() / 2);
+        let mut inflated = Vec::new();
+        std::io::Read::read_to_end(
+            &mut flate2::read::ZlibDecoder::new(payload.as_slice()),
+            &mut inflated,
+        )
+        .unwrap();
+        assert_eq!(&inflated, data);
+    }
+}
+
+#[test]
+fn zlib_upload_keeps_png_and_incompressible_data_raw() {
+    let png = GraphicsOutput {
+        operations: vec![GraphicsOperation::Upload {
+            control: "a=t,t=d,f=100,s=4,v=8,i=42,q=2".to_owned(),
+            data: Arc::from(vec![0u8; 3072 * 2]),
+        }],
+    };
+    let mut actual = Vec::new();
+    write_composed_frame(
+        &mut actual,
+        b"text",
+        &png,
+        &mut FileTransport::default(),
+        UploadCompression::Zlib,
+    )
+    .unwrap();
+    let (control, payload) = upload_payload(&actual, "a=t,t=d,");
+    assert_eq!(control, "a=t,t=d,f=100,s=4,v=8,i=42,q=2,m=1");
+    assert_eq!(payload, vec![0u8; 3072 * 2]);
+
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let photo_like: Vec<u8> = (0..DEFLATE_SAMPLE_SLICES * DEFLATE_SAMPLE_SLICE_BYTES * 2)
+        .map(|index| {
+            if index % 4 == 3 {
+                return 255;
+            }
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        })
+        .collect();
+    let photo = GraphicsOutput {
+        operations: vec![GraphicsOperation::Upload {
+            control: "a=t,t=d,f=32,s=256,v=128,i=42,q=2".to_owned(),
+            data: Arc::from(photo_like.clone()),
+        }],
+    };
+    for (graphics, name) in [(&photo, "photo-like rgba"), (&output(32), "four bytes")] {
+        let mut zlib = Vec::new();
+        write_composed_frame(
+            &mut zlib,
+            b"text",
+            graphics,
+            &mut FileTransport::default(),
+            UploadCompression::Zlib,
+        )
+        .unwrap();
+        let mut raw = Vec::new();
+        write_composed_frame(
+            &mut raw,
+            b"text",
+            graphics,
+            &mut FileTransport::default(),
+            UploadCompression::None,
+        )
+        .unwrap();
+        assert_eq!(zlib, raw, "{name} stays raw");
+    }
+    assert!(
+        crate::kitty_graphics::compress_zlib(&photo_like)
+            .unwrap()
+            .len()
+            < photo_like.len()
+    );
 }

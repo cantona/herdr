@@ -56,6 +56,7 @@ pub(super) struct ClientState {
     pub(super) pixel_geometry_exact: bool,
     /// The host's answer to the SGR pixel mouse probe; None when unknown.
     pub(super) host_sgr_pixel_mouse: Option<bool>,
+    pub(super) host_upload_compression: frame_output::UploadCompression,
     #[cfg(unix)]
     pub(super) direct_graphics_response: Arc<Mutex<direct_graphics::ResponseMatcher>>,
     #[cfg(unix)]
@@ -125,6 +126,7 @@ impl ClientState {
             pixel_geometry_enabled: false,
             pixel_geometry_exact: false,
             host_sgr_pixel_mouse: None,
+            host_upload_compression: frame_output::UploadCompression::None,
             #[cfg(unix)]
             direct_graphics_response: Default::default(),
             #[cfg(unix)]
@@ -536,6 +538,7 @@ impl ClientState {
                 encoded,
                 &graphics,
                 &mut self.image_files,
+                self.host_upload_compression,
             )?;
         } else {
             writer.write_all(encoded)?;

@@ -30,11 +30,19 @@ impl std::ops::Deref for ComposedFrame {
 
 static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 
+/// Whether raw pixel uploads to the host may be deflated (`o=z`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UploadCompression {
+    None,
+    Zlib,
+}
+
 pub(super) fn write_composed_frame(
     mut writer: impl io::Write,
     encoded: &[u8],
     graphics: &GraphicsOutput,
     files: &mut super::image_files::FileTransport,
+    compression: UploadCompression,
 ) -> io::Result<()> {
     if graphics.is_empty() {
         return writer.write_all(encoded);
@@ -70,6 +78,9 @@ pub(super) fn write_composed_frame(
                     let control = control.replace(",t=d,", ",t=t,");
                     let path = base64::engine::general_purpose::STANDARD.encode(path.as_bytes());
                     write!(writer, "\x1b_G{control};{path}\x1b\\")?;
+                } else if let Some(deflated) = deflated_upload(compression, control, data)? {
+                    let control = format!("{control},o=z");
+                    crate::kitty_graphics::write_kitty_data(&mut writer, &control, &deflated)?;
                 } else {
                     crate::kitty_graphics::write_kitty_data(&mut writer, control, data)?;
                 }
@@ -79,6 +90,50 @@ pub(super) fn write_composed_frame(
     writer.write_all(b"\x1b8")?;
     writer.write_all(&encoded[insertion..])?;
     io::Write::flush(&mut writer)
+}
+
+/// Deflates a raw RGB or RGBA upload when the host accepts `o=z`, a sample
+/// says it pays off, and the result is smaller. A PNG upload is compressed
+/// already.
+fn deflated_upload(
+    compression: UploadCompression,
+    control: &str,
+    data: &[u8],
+) -> io::Result<Option<Vec<u8>>> {
+    if compression != UploadCompression::Zlib
+        || !control
+            .split(',')
+            .any(|part| matches!(part, "f=24" | "f=32"))
+        || !deflate_pays_off(data)?
+    {
+        return Ok(None);
+    }
+    let deflated = crate::kitty_graphics::compress_zlib(data)?;
+    Ok((deflated.len() < data.len()).then_some(deflated))
+}
+
+/// Slices of an upload deflated as a sample before the whole of it is.
+pub(super) const DEFLATE_SAMPLE_SLICES: usize = 16;
+pub(super) const DEFLATE_SAMPLE_SLICE_BYTES: usize = 4096;
+
+/// Photo-like RGBA shrinks by a few percent at the fast level and takes
+/// about 25 ms per 900x988 frame, where base64 of the raw pixels takes 3 ms,
+/// so pixels whose sample keeps more than half its size go raw. Sixteen
+/// slices spread over the data stand in for the whole; an upload no larger
+/// than the sample is deflated outright.
+fn deflate_pays_off(data: &[u8]) -> io::Result<bool> {
+    let sample_len = DEFLATE_SAMPLE_SLICES * DEFLATE_SAMPLE_SLICE_BYTES;
+    if data.len() <= sample_len {
+        return Ok(true);
+    }
+    // data.len() > sample_len, so every slice fits inside its stride.
+    let stride = data.len() / DEFLATE_SAMPLE_SLICES;
+    let mut sample = Vec::with_capacity(sample_len);
+    for start in (0..DEFLATE_SAMPLE_SLICES).map(|slice| slice * stride) {
+        sample.extend_from_slice(&data[start..start + DEFLATE_SAMPLE_SLICE_BYTES]);
+    }
+    let deflated = crate::kitty_graphics::compress_zlib(&sample)?;
+    Ok(deflated.len() * 2 <= sample.len())
 }
 
 pub(super) fn write_encoded_frame_with_graphics(
