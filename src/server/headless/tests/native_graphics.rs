@@ -324,9 +324,9 @@ fn inline_commit_updates_bank_only_for_a_new_asset_revision() {
     let (_next_transfer, next_image) = prepare_scene_and_commit(&mut exact, 7, scene_for(1, 124));
     assert_eq!(next_image, base);
 
-    // A new inline revision has no native key mapping on the client and is
-    // uploaded at the logical base ID. The next native revision must therefore
-    // stage into bank 1 rather than collide with that visible base image.
+    // An older client uploads a new inline revision at the logical base ID, so
+    // the next native revision must stage into bank 1 rather than collide with
+    // that visible base image.
     let mut revised = test_headless_server();
     let (_control, _render) = add_client(&mut revised, 7);
     let (first_transfer, first_image) = prepare_scene_and_commit(&mut revised, 7, scene());
@@ -334,6 +334,68 @@ fn inline_commit_updates_bank_only_for_a_new_asset_revision() {
     commit_scene(&mut revised, 7, &scene_for(1, 124));
     let (_next_transfer, next_image) = prepare_scene_and_commit(&mut revised, 7, scene_for(1, 125));
     assert_eq!(next_image, base ^ NATIVE_SLOT_BIT);
+}
+
+#[test]
+fn inline_revisions_never_occupy_the_bank_the_server_stages_native_into() {
+    // Inline revisions alternate banks on the client; the server records every
+    // new inline key as bank 0 and stages the next native upload into bank 1.
+    let mut server = test_headless_server();
+    let (_control, _render) = add_client(&mut server, 7);
+    let scope = server.client_shell_boot_id.clone();
+    let mut client = crate::kitty_graphics::surface::ClientState::new();
+    client.set_scope(&scope);
+    let cell = crate::kitty_graphics::HostCellSize {
+        width_px: 10,
+        height_px: 20,
+    };
+    let encode = |client: &mut crate::kitty_graphics::surface::ClientState| {
+        let _ = client.encode(
+            crate::kitty_graphics::surface::Visibility::Main,
+            (0, 0),
+            None,
+            cell,
+            &crate::kitty_graphics::surface::Occlusion::default(),
+        );
+    };
+    encode(&mut client);
+    for fingerprint in [124, 125] {
+        let inline = scene_for(1, fingerprint);
+        commit_scene(&mut server, 7, &inline);
+        client.set_scene(inline);
+        encode(&mut client);
+    }
+
+    let mut desired = scene_for(1, 126);
+    let (pending, message) = server
+        .native_graphics
+        .prepare(7, &scope, &mut desired, &DeliveryCache::default())
+        .expect("eligible native export");
+    let ServerMessage::GraphicsFile {
+        transfer_id,
+        image_id,
+        surface_asset: Some(asset),
+        ..
+    } = message
+    else {
+        panic!("expected file upload");
+    };
+    let base = crate::kitty_graphics::surface::native_host_image_id(&scope, &asset);
+    assert_eq!(image_id, base ^ NATIVE_SLOT_BIT);
+    commit_scene(&mut server, 7, &desired);
+    server.native_graphics.commit(7, pending);
+    client.set_scene(desired);
+    let accepted = client.trust_direct_asset(&asset, image_id);
+    assert!(accepted, "the client must accept the bank the server chose");
+    assert!(native_started(&mut server, 7, transfer_id, image_id));
+    native_result(&mut server, 7, transfer_id, image_id, accepted);
+    assert!(!server.native_graphics.is_pending(7));
+
+    let mut later = scene_for(1, 127);
+    assert!(server
+        .native_graphics
+        .prepare(7, &scope, &mut later, &DeliveryCache::default())
+        .is_some());
 }
 
 #[test]

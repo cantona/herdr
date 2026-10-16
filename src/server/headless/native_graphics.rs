@@ -114,8 +114,9 @@ impl NativeGraphics {
     ///
     /// `inline_assets` contains only payloads actually queued on the wire; a
     /// selected native upload has already been removed and changes bank only
-    /// after its ACK. A new inline key addresses bank 0, while replaying the
-    /// exact native key keeps the client's existing key-to-bank mapping.
+    /// after its ACK. A new inline key counts as bank 0 (older clients upload it
+    /// at the base ID; newer ones use a separate inline range), while replaying
+    /// the exact native key keeps the client's existing key-to-bank mapping.
     /// Pruning is committed here as well: a scene rejected by the writer must
     /// not mutate bank history for pixels the client is still displaying.
     pub(super) fn commit_scene(
