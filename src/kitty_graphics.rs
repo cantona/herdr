@@ -849,6 +849,16 @@ fn kitty_format_code(format: KittyImageFormat) -> u32 {
     }
 }
 
+/// Deflates `data` into the RFC 1950 zlib stream a Kitty `o=z` upload carries.
+pub(crate) fn compress_zlib(data: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut encoder = flate2::write::ZlibEncoder::new(
+        Vec::with_capacity(data.len() / 4),
+        flate2::Compression::fast(),
+    );
+    encoder.write_all(data)?;
+    encoder.finish()
+}
+
 fn encode_kitty_data(out: &mut Vec<u8>, control: &str, data: &[u8]) {
     write_kitty_data(out, control, data).expect("writing to Vec cannot fail");
 }

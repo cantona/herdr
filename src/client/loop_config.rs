@@ -13,6 +13,8 @@ pub(super) struct ClientLoopConfig {
     pub(super) host_escape_disambiguation_active: bool,
     /// The host terminal answered DECRQM for mode 1016, so it can report mouse pixels.
     pub(super) host_sgr_pixel_mouse_supported: bool,
+    /// The host terminal answered OK to a zlib-deflated Kitty graphics query.
+    pub(super) host_kitty_zlib_supported: bool,
     pub(super) initial_host_input: Vec<u8>,
     pub(super) endpoint_keybindings: bool,
     pub(super) remote_image_paste_key:

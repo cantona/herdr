@@ -207,6 +207,7 @@ fn run_client_with_mode(
         mouse_capture_active: mouse_capture,
         host_escape_disambiguation_active: false,
         host_sgr_pixel_mouse_supported: false,
+        host_kitty_zlib_supported: false,
         initial_host_input: Vec::new(),
         endpoint_keybindings,
         remote_image_paste_key,
@@ -302,7 +303,7 @@ fn run_client_with_mode(
     let mut terminal_guard = if direct_attach {
         setup_direct_attach_terminal(mouse_capture)
     } else {
-        setup_terminal(mouse_capture)
+        setup_terminal(mouse_capture, kitty_graphics_enabled)
     }
     .map_err(|err| {
         eprintln!("herdr: failed to set up terminal: {err}");
@@ -311,6 +312,7 @@ fn run_client_with_mode(
     loop_config.host_escape_disambiguation_active =
         terminal_guard.host_escape_disambiguation_active();
     loop_config.host_sgr_pixel_mouse_supported = terminal_guard.host_sgr_pixel_mouse_supported();
+    loop_config.host_kitty_zlib_supported = terminal_guard.host_kitty_zlib_supported();
     loop_config.initial_host_input = terminal_guard.take_buffered_host_input();
 
     // Install a panic hook so the foreground client always restores its terminal.
@@ -454,6 +456,11 @@ async fn run_client_loop(
         pixel_geometry_enabled: config.pixel_geometry_enabled,
         pixel_geometry_exact: initial_pixel_geometry_exact,
         host_sgr_pixel_mouse_supported: config.host_sgr_pixel_mouse_supported,
+        host_upload_compression: if config.host_kitty_zlib_supported {
+            frame_output::UploadCompression::Zlib
+        } else {
+            frame_output::UploadCompression::None
+        },
         #[cfg(unix)]
         direct_graphics_response: Arc::new(Mutex::new(direct_graphics::ResponseMatcher::default())),
         #[cfg(unix)]

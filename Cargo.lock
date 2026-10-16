@@ -787,6 +787,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "ctrlc",
+ "flate2",
  "futures-util",
  "ghostty-vt",
  "interprocess",

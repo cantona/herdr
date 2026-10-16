@@ -55,6 +55,7 @@ pub(super) struct ClientState {
     pub(super) pixel_geometry_enabled: bool,
     pub(super) pixel_geometry_exact: bool,
     pub(super) host_sgr_pixel_mouse_supported: bool,
+    pub(super) host_upload_compression: frame_output::UploadCompression,
     #[cfg(unix)]
     pub(super) direct_graphics_response: Arc<Mutex<direct_graphics::ResponseMatcher>>,
     #[cfg(unix)]
@@ -120,6 +121,7 @@ impl ClientState {
             pixel_geometry_enabled: false,
             pixel_geometry_exact: false,
             host_sgr_pixel_mouse_supported: true,
+            host_upload_compression: frame_output::UploadCompression::None,
             #[cfg(unix)]
             direct_graphics_response: Default::default(),
             #[cfg(unix)]
@@ -531,6 +533,7 @@ impl ClientState {
                 encoded,
                 &graphics,
                 &mut self.image_files,
+                self.host_upload_compression,
             )?;
         } else {
             writer.write_all(encoded)?;

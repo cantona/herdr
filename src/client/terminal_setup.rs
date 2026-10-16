@@ -28,8 +28,13 @@ use super::frame_output::clear_received_kitty_graphics;
 /// Sets up the terminal for client mode (raw mode, optional mouse, keyboard enhancements).
 ///
 /// Returns a guard that restores the terminal when dropped.
-pub(super) fn setup_terminal(mouse_capture: bool) -> io::Result<TerminalGuard> {
-    setup_terminal_with_capabilities(true, mouse_capture)
+/// `graphics_query` adds the zlib graphics query to the host probe; pass
+/// false when this client will never send graphics.
+pub(super) fn setup_terminal(
+    mouse_capture: bool,
+    graphics_query: bool,
+) -> io::Result<TerminalGuard> {
+    setup_terminal_with_capabilities(true, mouse_capture, graphics_query)
 }
 
 /// Sets up a direct attach terminal.
@@ -38,17 +43,19 @@ pub(super) fn setup_terminal(mouse_capture: bool) -> io::Result<TerminalGuard> {
 /// capture lets wheel events drive the attached viewport or reach child
 /// programs that requested mouse input.
 pub(super) fn setup_direct_attach_terminal(mouse_capture: bool) -> io::Result<TerminalGuard> {
-    setup_terminal_with_capabilities(false, mouse_capture)
+    setup_terminal_with_capabilities(false, mouse_capture, false)
 }
 
 pub(super) fn setup_terminal_with_capabilities(
     enable_client_protocols: bool,
     mouse_capture: bool,
+    graphics_query: bool,
 ) -> io::Result<TerminalGuard> {
     ratatui::init();
     let mut terminal_guard = TerminalGuard {
         host_escape_disambiguation_active: false,
         host_sgr_pixel_mouse_supported: false,
+        host_kitty_zlib_supported: false,
         buffered_host_input: Vec::new(),
         reset_keyboard_enhancements: false,
         reset_modify_other_keys: false,
@@ -77,7 +84,7 @@ pub(super) fn setup_terminal_with_capabilities(
     let probe = if enable_client_protocols {
         terminal_guard.reset_keyboard_enhancements = true;
         push_keyboard_enhancement_flags()?;
-        let probe = query_host_input_capabilities();
+        let probe = query_host_input_capabilities(graphics_query);
         set_mouse_capture(mouse_capture, false)?;
         execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
         if host_color_scheme_reports {
@@ -97,6 +104,7 @@ pub(super) fn setup_terminal_with_capabilities(
         HostInputProbe {
             escape_disambiguation: false,
             sgr_pixel_mouse: false,
+            kitty_zlib: false,
             buffered_input: Vec::new(),
         }
     };
@@ -131,6 +139,7 @@ pub(super) fn setup_terminal_with_capabilities(
 
     terminal_guard.host_escape_disambiguation_active = probe.escape_disambiguation;
     terminal_guard.host_sgr_pixel_mouse_supported = probe.sgr_pixel_mouse;
+    terminal_guard.host_kitty_zlib_supported = probe.kitty_zlib;
     terminal_guard.buffered_host_input = probe.buffered_input;
     Ok(terminal_guard)
 }
@@ -143,6 +152,7 @@ pub(super) fn should_enable_host_color_scheme_reports(enable_client_protocols: b
 pub(super) struct TerminalGuard {
     host_escape_disambiguation_active: bool,
     host_sgr_pixel_mouse_supported: bool,
+    host_kitty_zlib_supported: bool,
     buffered_host_input: Vec<u8>,
     reset_keyboard_enhancements: bool,
     reset_modify_other_keys: bool,
@@ -164,6 +174,8 @@ struct HostKeyboardProbeResponses {
     flags: Option<u16>,
     /// DECRQM answer for SGR pixel mouse (1016): 0 unrecognised, 1/3 set, 2/4 reset.
     sgr_pixel_mouse: Option<u8>,
+    /// Answer to the zlib graphics query: `OK` is true, any other message false.
+    kitty_zlib: Option<bool>,
     primary_device_attributes: bool,
 }
 
@@ -172,37 +184,106 @@ struct HostInputProbe {
     escape_disambiguation: bool,
     /// The host recognises DEC mode 1016, so its mouse reports can carry pixels.
     sgr_pixel_mouse: bool,
+    /// The host decoded a zlib-deflated Kitty graphics query, so pixel
+    /// uploads to it can carry `o=z`.
+    kitty_zlib: bool,
     buffered_input: Vec<u8>,
 }
 
-/// Asks the host terminal what it supports before mouse reporting is turned
-/// on: the kitty keyboard flags and DECRQM for SGR pixel mouse. Primary
-/// device attributes come last so a terminal that ignores a query still ends
-/// the probe. A host that reports only cells must not be driven in pixel
-/// mode: its cell numbers would be read as pixels. A host too slow to answer
-/// within the probe window is treated the same way.
+/// Image id of the zlib graphics query. Real host image ids start at 10_000.
 #[cfg(not(windows))]
-fn query_host_input_capabilities() -> HostInputProbe {
-    const QUERY: &[u8] = b"\x1b[?u\x1b[?1016$p\x1b[c";
+const KITTY_ZLIB_PROBE_ID: u32 = 2;
 
+/// Kitty keyboard flags and DECRQM 1016, then primary device attributes to
+/// end the probe either way.
+#[cfg(not(windows))]
+const HOST_INPUT_QUERY: &[u8] = b"\x1b[?u\x1b[?1016$p\x1b[c";
+
+/// A graphics query carrying one zlib-deflated RGB pixel: a host that
+/// inflates it answers `i=2;OK`, one that cannot answers an error or
+/// nothing. Primary device attributes end this phase too.
+#[cfg(not(windows))]
+const HOST_GRAPHICS_QUERY: &[u8] =
+    b"\x1b_Gi=2,a=q,t=d,f=24,s=1,v=1,o=z;eJxjYGAAAAADAAE=\x1b\\\x1b[c";
+
+/// GNU screen keeps an APC as the window's hardstatus and tmux makes it the
+/// pane title, so the graphics query goes only to a host that answered the
+/// kitty keyboard query, which neither does (tmux 3.6 and screen 5 answer
+/// DA1 alone). `STY`, `TMUX` and a screen or tmux `TERM` still rule it out
+/// without waiting for that evidence. The first query must also have seen
+/// its own DA1: a DA1 still in flight would end the second phase before
+/// the graphics answer arrives.
+#[cfg(not(windows))]
+fn graphics_query_allowed(
+    graphics_query: bool,
+    input_probe: &HostKeyboardProbeResponses,
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> bool {
+    graphics_query
+        && input_probe.primary_device_attributes
+        && input_probe.flags.is_some()
+        && ["STY", "TMUX"].iter().all(|key| env(key).is_none())
+        && !env("TERM").is_some_and(|term| {
+            let term = term.to_string_lossy();
+            term.starts_with("screen") || term.starts_with("tmux")
+        })
+}
+
+/// Asks the host terminal what it supports before mouse reporting is turned
+/// on: the kitty keyboard flags, DECRQM for SGR pixel mouse and, when this
+/// client may send graphics and the host looks able to answer, whether it
+/// inflates a zlib upload. Primary device attributes come last in each
+/// query so a terminal that ignores one still ends the probe. The second
+/// query waits for its own answer, so a host that answered the keyboard
+/// query costs one more round trip at client start. A host that reports
+/// only cells must not be driven in pixel mode: its cell numbers would be
+/// read as pixels. A host too slow to answer within the probe window is
+/// treated the same way.
+#[cfg(not(windows))]
+fn query_host_input_capabilities(graphics_query: bool) -> HostInputProbe {
     let mut buffered_input = Vec::new();
+    let mut input_probe = HostKeyboardProbeResponses::default();
+    probe_host(HOST_INPUT_QUERY, &mut buffered_input, &mut input_probe);
+    let mut graphics_probe = HostKeyboardProbeResponses::default();
+    if graphics_query_allowed(graphics_query, &input_probe, |key| std::env::var_os(key)) {
+        probe_host(
+            HOST_GRAPHICS_QUERY,
+            &mut buffered_input,
+            &mut graphics_probe,
+        );
+    }
+    HostInputProbe {
+        escape_disambiguation: host_escape_disambiguation_confirmed(&input_probe),
+        sgr_pixel_mouse: host_sgr_pixel_mouse_supported(&input_probe),
+        kitty_zlib: host_kitty_zlib_supported(&graphics_probe),
+        buffered_input,
+    }
+}
+
+/// Writes one query and collects its answers into `responses` until the
+/// primary device attributes reply, the probe window, or the input cap. A
+/// query whose answers could not be read is not written at all.
+#[cfg(not(windows))]
+fn probe_host(
+    query: &[u8],
+    buffered_input: &mut Vec<u8>,
+    responses: &mut HostKeyboardProbeResponses,
+) {
+    if buffered_input.len() >= MAX_BUFFERED_HOST_INPUT {
+        return;
+    }
     if let Err(err) = io::stdout()
-        .write_all(QUERY)
+        .write_all(query)
         .and_then(|()| io::stdout().flush())
     {
         tracing::debug!(%err, "host input capability query unavailable");
-        return HostInputProbe {
-            escape_disambiguation: false,
-            sgr_pixel_mouse: false,
-            buffered_input,
-        };
+        return;
     }
 
     // Bypass StdinLock's shared buffer so poll and read observe the same bytes.
     let stdin = io::stdin();
     let stdin_fd = stdin.as_raw_fd();
     let deadline = Instant::now() + HOST_KEYBOARD_QUERY_TIMEOUT;
-    let mut responses = HostKeyboardProbeResponses::default();
     while !responses.primary_device_attributes && buffered_input.len() < MAX_BUFFERED_HOST_INPUT {
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             break;
@@ -225,7 +306,7 @@ fn query_host_input_capabilities() -> HostInputProbe {
             Ok(0) => break,
             Ok(read) => {
                 buffered_input.extend_from_slice(&scratch[..read]);
-                consume_host_keyboard_probe_responses(&mut buffered_input, &mut responses);
+                consume_host_keyboard_probe_responses(buffered_input, responses);
             }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(err) => {
@@ -233,12 +314,6 @@ fn query_host_input_capabilities() -> HostInputProbe {
                 break;
             }
         }
-    }
-
-    HostInputProbe {
-        escape_disambiguation: host_escape_disambiguation_confirmed(&responses),
-        sgr_pixel_mouse: host_sgr_pixel_mouse_supported(&responses),
-        buffered_input,
     }
 }
 
@@ -259,6 +334,25 @@ fn host_sgr_pixel_mouse_supported(responses: &HostKeyboardProbeResponses) -> boo
     responses
         .sgr_pixel_mouse
         .is_some_and(|state| matches!(state, 1..=3))
+}
+
+#[cfg(not(windows))]
+fn host_kitty_zlib_supported(responses: &HostKeyboardProbeResponses) -> bool {
+    responses.kitty_zlib == Some(true)
+}
+
+/// `ESC _ G i=<probe id> ; OK ESC \` answers the zlib graphics query; any
+/// other message for that id is a refusal. Other control strings are not ours.
+#[cfg(not(windows))]
+fn kitty_zlib_probe_reply(control_string: &[u8]) -> Option<bool> {
+    let body = control_string
+        .strip_prefix(b"\x1b_G")?
+        .strip_suffix(b"\x1b\\")?;
+    let (keys, message) = std::str::from_utf8(body).ok()?.split_once(';')?;
+    let probe_key = format!("i={KITTY_ZLIB_PROBE_ID}");
+    keys.split(',')
+        .any(|key| key == probe_key)
+        .then_some(message == "OK")
 }
 
 #[cfg(not(windows))]
@@ -286,6 +380,15 @@ fn consume_host_keyboard_probe_responses(
             let Some(control_string_end) = control_string_end else {
                 break;
             };
+            let reply =
+                kitty_zlib_probe_reply(&buffered_input[offset..offset + control_string_end]);
+            if let Some(supported) = reply {
+                if !responses.primary_device_attributes {
+                    responses.kitty_zlib = Some(supported);
+                }
+                buffered_input.drain(offset..offset + control_string_end);
+                continue;
+            }
             offset += control_string_end;
             continue;
         }
@@ -388,10 +491,11 @@ fn host_control_string_end(bytes: &[u8]) -> Option<Option<usize>> {
 /// Windows reads mouse input through the console or VTI backend rather than
 /// by parsing 1016 reports itself, so pixel mode stays available there.
 #[cfg(windows)]
-fn query_host_input_capabilities() -> HostInputProbe {
+fn query_host_input_capabilities(_graphics_query: bool) -> HostInputProbe {
     HostInputProbe {
         escape_disambiguation: false,
         sgr_pixel_mouse: true,
+        kitty_zlib: false,
         buffered_input: Vec::new(),
     }
 }
@@ -795,6 +899,10 @@ impl TerminalGuard {
         self.host_sgr_pixel_mouse_supported
     }
 
+    pub(super) fn host_kitty_zlib_supported(&self) -> bool {
+        self.host_kitty_zlib_supported
+    }
+
     pub(super) fn take_buffered_host_input(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.buffered_host_input)
     }
@@ -863,6 +971,8 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(windows))]
+    use base64::Engine as _;
 
     #[cfg(windows)]
     #[test]
@@ -1020,6 +1130,130 @@ mod tests {
 
         assert_eq!(responses.sgr_pixel_mouse, None);
         assert!(!host_sgr_pixel_mouse_supported(&responses));
+        assert!(buffered.is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn host_probe_query_carries_one_deflated_pixel() {
+        let query = std::str::from_utf8(HOST_GRAPHICS_QUERY).unwrap();
+        let apc = &query[..query.find("\x1b\\").unwrap()];
+        let (keys, payload) = apc.strip_prefix("\x1b_G").unwrap().split_once(';').unwrap();
+        assert_eq!(
+            keys,
+            format!("i={KITTY_ZLIB_PROBE_ID},a=q,t=d,f=24,s=1,v=1,o=z")
+        );
+        let deflated = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        let mut pixel = Vec::new();
+        std::io::Read::read_to_end(
+            &mut flate2::read::ZlibDecoder::new(deflated.as_slice()),
+            &mut pixel,
+        )
+        .unwrap();
+        assert_eq!(pixel, [0, 0, 0]);
+        assert!(query.ends_with("\x1b[c"));
+        assert!(!HOST_INPUT_QUERY.contains(&b'_'));
+        assert!(HOST_INPUT_QUERY.ends_with(b"\x1b[c"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn graphics_query_needs_a_kitty_keyboard_answer_and_no_multiplexer() {
+        let plain = |key: &str| match key {
+            "TERM" => Some(std::ffi::OsString::from("xterm-kitty")),
+            _ => None,
+        };
+        let answered = HostKeyboardProbeResponses {
+            flags: Some(0),
+            primary_device_attributes: true,
+            ..Default::default()
+        };
+        let silent = HostKeyboardProbeResponses {
+            primary_device_attributes: true,
+            ..Default::default()
+        };
+        let unfinished = HostKeyboardProbeResponses {
+            flags: Some(0),
+            ..Default::default()
+        };
+        assert!(graphics_query_allowed(true, &answered, plain));
+        assert!(graphics_query_allowed(true, &answered, |_| None));
+        assert!(!graphics_query_allowed(false, &answered, plain));
+        assert!(!graphics_query_allowed(true, &silent, plain));
+        assert!(!graphics_query_allowed(true, &unfinished, plain));
+        for key in ["STY", "TMUX"] {
+            assert!(!graphics_query_allowed(true, &answered, |name| {
+                if name == key {
+                    Some(std::ffi::OsString::new())
+                } else {
+                    plain(name)
+                }
+            }));
+        }
+        for term in ["screen", "screen-256color", "tmux", "tmux-256color"] {
+            assert!(
+                !graphics_query_allowed(true, &answered, |key| (key == "TERM")
+                    .then(|| std::ffi::OsString::from(term))),
+                "{term}"
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn host_probe_reads_zlib_graphics_reply() {
+        for (reply, supported) in [
+            ("\x1b_Gi=2;OK\x1b\\", Some(true)),
+            ("\x1b_Gi=2;EINVAL:decompression failed\x1b\\", Some(false)),
+            ("\x1b_Gi=2,I=0;ENODATA:nothing\x1b\\", Some(false)),
+        ] {
+            let mut buffered = format!("\x1b[?7u{reply}\x1b[?1;2c").into_bytes();
+            let mut responses = HostKeyboardProbeResponses::default();
+
+            consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
+
+            assert_eq!(responses.kitty_zlib, supported, "{reply:?}");
+            assert_eq!(
+                host_kitty_zlib_supported(&responses),
+                supported == Some(true)
+            );
+            assert!(host_escape_disambiguation_confirmed(&responses));
+            assert!(buffered.is_empty(), "{reply:?}");
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn host_probe_keeps_other_graphics_replies_and_waits_for_a_split_one() {
+        let mut buffered = b"\x1b_Gi=7;OK\x1b\\\x1b[?1;2c".to_vec();
+        let mut responses = HostKeyboardProbeResponses::default();
+        consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
+        assert_eq!(responses.kitty_zlib, None);
+        assert!(!host_kitty_zlib_supported(&responses));
+        assert_eq!(buffered, b"\x1b_Gi=7;OK\x1b\\");
+
+        let mut buffered = b"\x1b_Gi=2;O".to_vec();
+        let mut responses = HostKeyboardProbeResponses::default();
+        consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
+        assert_eq!(responses.kitty_zlib, None);
+        assert_eq!(buffered, b"\x1b_Gi=2;O");
+        buffered.extend_from_slice(b"K\x1b\\\x1b[?1;2c");
+        consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
+        assert_eq!(responses.kitty_zlib, Some(true));
+        assert!(buffered.is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn host_probe_ignores_a_graphics_reply_after_device_attributes() {
+        let mut buffered = b"\x1b[?1;2c\x1b_Gi=2;OK\x1b\\".to_vec();
+        let mut responses = HostKeyboardProbeResponses::default();
+        consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
+        assert!(responses.primary_device_attributes);
+        assert_eq!(responses.kitty_zlib, None);
+        assert!(!host_kitty_zlib_supported(&responses));
         assert!(buffered.is_empty());
     }
 
