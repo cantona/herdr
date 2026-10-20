@@ -5624,6 +5624,22 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_mouse_sgr_pixels_without_pixel_geometry_keeps_cell_reports() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[?1003h\x1b[?1006h\x1b[?1016h");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let report = pane.encode_mouse_button(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crate::input::mouse::Position::Cell { column: 4, row: 6 },
+            crossterm::event::KeyModifiers::empty(),
+        );
+
+        assert_eq!(report.as_deref(), Some(&b"\x1b[<0;5;7M"[..]));
+    }
+
+    #[test]
     fn ghostty_mouse_sgr_pixels_preserves_exact_and_scales_cell_input() {
         let (tx, _rx) = mpsc::channel(4);
         let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();

@@ -222,27 +222,32 @@ pub(super) fn ghostty_mouse_encoder_for_terminal(
     let sgr_pixels = terminal
         .mode_get(crate::ghostty::MODE_MOUSE_SGR_PIXELS)
         .ok()?;
+    let width_px = terminal.width_px().ok()?;
+    let height_px = terminal.height_px().ok()?;
+    let has_pixels = width_px > 0 && height_px > 0;
     let event_position = match position {
-        crate::input::mouse::Position::Cell { column, row } if sgr_pixels => {
-            let width_px = terminal.width_px().ok()?;
-            let height_px = terminal.height_px().ok()?;
+        crate::input::mouse::Position::Cell { column, row } if sgr_pixels && has_pixels => {
             let x = cell_center_px(u32::from(column), cols, width_px)?;
             let y = cell_center_px(u32::from(row), rows, height_px)?;
             encoder.set_format(crate::ghostty::MOUSE_FORMAT_SGR_PIXELS);
             encoder.set_size(width_px, height_px, width_px / cols, height_px / rows);
             (x as f32, y as f32)
         }
+        // Also a pixel-mode pane on a client without pixel geometry: there
+        // is nothing to convert with, so the cell report goes out unchanged
+        // rather than no report at all.
         crate::input::mouse::Position::Cell { column, row } => {
             if cols == 0 || rows == 0 {
                 return None;
+            }
+            if sgr_pixels {
+                encoder.set_format(crate::ghostty::MOUSE_FORMAT_SGR);
             }
             encoder.set_size(cols, rows, 1, 1);
             (f32::from(column), f32::from(row))
         }
         crate::input::mouse::Position::Pixels { x, y } => {
-            let width_px = terminal.width_px().ok()?;
-            let height_px = terminal.height_px().ok()?;
-            if width_px == 0 || height_px == 0 || cols == 0 || rows == 0 {
+            if !has_pixels || cols == 0 || rows == 0 {
                 return None;
             }
             if sgr_pixels {
