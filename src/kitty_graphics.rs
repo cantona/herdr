@@ -141,9 +141,9 @@ fn encode_placement_update(
     let image_signature = image_signature(placement, format_code);
     let placement_signature =
         placement_signature(clipped, placement.placement.z, placement.scrollback_offset);
-    let image_current = cache.images.get(&host_id) == Some(&image_signature);
-    let placement_current = cache.placements.get(&key) == Some(&placement_signature)
-        && (!cache.replay_placements || cache.replayed_placements.contains(&key));
+    let (image_current, placed_here) = placement_state(cache, placement, visible);
+    let placement_current =
+        placed_here && (!cache.replay_placements || cache.replayed_placements.contains(&key));
     if image_current
         && placement_current
         && cache.sources.get(&placement.source_key) == Some(&host_id)
@@ -199,6 +199,26 @@ fn encode_placement_update(
     Some(output)
 }
 
+/// Whether the host already holds this piece's image, and already shows
+/// this piece where the frame wants it. A replay re-places such a piece
+/// without changing what the host shows.
+fn placement_state(
+    cache: &HostGraphicsCache,
+    placement: &HostPlacement,
+    visible: VisiblePlacement,
+) -> (bool, bool) {
+    let key = (visible.host_id, visible.placement_id);
+    let image_current = cache.images.get(&visible.host_id)
+        == Some(&image_signature(placement, visible.format_code));
+    let placed_here = cache.placements.get(&key)
+        == Some(&placement_signature(
+            visible.clipped,
+            placement.placement.z,
+            placement.scrollback_offset,
+        ));
+    (image_current, placed_here)
+}
+
 fn placement_host_id(placement: &HostPlacement) -> u32 {
     placement
         .host_image_id
@@ -216,7 +236,6 @@ struct VisiblePlacement {
 /// Host image every source on `previous` is leaving this frame.
 struct Swap {
     sources_left: usize,
-    areas: Vec<ClippedPlacement>,
 }
 
 fn overlaps(old: &PlacementSignature, new: &ClippedPlacement) -> bool {
@@ -243,15 +262,21 @@ fn encode_graphics_output(
 /// delete the old image once every source on it has been placed. A host
 /// that presents a synchronized update early (rio ends one after 2 MiB)
 /// then never shows a blank between the two, at the cost of one more
-/// resident image on the host while a swap is in flight. An old piece
-/// that no new piece overlaps still goes first, so an image that moved
-/// away entirely leaves nothing stale behind. An old piece that any new
-/// piece overlaps stays whole until the swap: on an early present it
-/// shows at its old place and size, even where it reaches past the new
-/// area or under a popup opened over it this frame. Every other delete
-/// keeps its place at the start, including a retired id this frame
-/// uploads again: replacing an image under the same id is
-/// terminal-dependent.
+/// resident image on the host while a swap is in flight. The same holds
+/// for any other piece going away that a piece placed this frame overlaps,
+/// whether of another source, of a retired image, or of an image a source
+/// leaves while it is still shown elsewhere: it is deleted after that
+/// piece, at the end of the frame when the piece comes later. A piece only
+/// replayed is not placed. An old piece that no placed piece overlaps goes
+/// first, so an image that moved away entirely leaves nothing stale
+/// behind. An old piece that a placed piece overlaps stays whole until
+/// then: on an early present it shows at its old place and size, even
+/// where it reaches past the new area or under a popup opened over it this
+/// frame. A retired id this frame uploads again is still deleted first:
+/// replacing an image under the same id is terminal-dependent. A frame that
+/// fails to reach the host leaves the pieces whose deletes it carried on the
+/// host until a scope reset, since the cache applied them before the write;
+/// the swap path has lived with that since it was ordered this way.
 fn encode_graphics_output_retiring(
     cache: &mut HostGraphicsCache,
     placements: &[HostPlacement],
@@ -293,51 +318,102 @@ fn encode_graphics_output_retiring(
         if previous == visible.host_id {
             continue;
         }
-        let swap = swaps.entry(previous).or_insert(Swap {
-            sources_left: 0,
-            areas: Vec::new(),
-        });
+        let swap = swaps.entry(previous).or_insert(Swap { sources_left: 0 });
         if leaving.insert(&placement.source_key, previous).is_none() {
             swap.sources_left += 1;
         }
-        swap.areas.push(visible.clipped);
     }
+    let undesired = cache
+        .placements
+        .iter()
+        .filter(|(key, _)| !desired_placements.contains(key))
+        .map(|(key, old)| (*key, *old))
+        .collect::<Vec<_>>();
+    // Only a frame something leaves needs to know which pieces the host sees
+    // change (a new or changed image, or a piece at a new place; a replayed
+    // piece is not a change), so a steady frame does no extra work.
+    let something_leaves = !retired.is_empty() || !swaps.is_empty() || !undesired.is_empty();
+    let placed_areas = if something_leaves {
+        placements
+            .iter()
+            .zip(&frame)
+            .enumerate()
+            .filter_map(|(index, (placement, visible))| {
+                let visible = (*visible)?;
+                let (image_current, placed_here) = placement_state(cache, placement, visible);
+                (!image_current || !placed_here).then_some((index, visible.clipped))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    // Before anything is placed every placed piece counts; once the frame
+    // has reached `index`, only the pieces still to come do.
+    let placed_after = |old: &PlacementSignature, index: Option<usize>| {
+        placed_areas
+            .iter()
+            .any(|(at, area)| index.is_none_or(|index| *at > index) && overlaps(old, area))
+    };
+    // The last piece of the frame that lands on one of `image`'s pieces.
+    let last_cover = |cache: &HostGraphicsCache, image: u32| {
+        cache
+            .placements
+            .iter()
+            .filter(|((id, _), _)| *id == image)
+            .flat_map(|(_, old)| {
+                placed_areas
+                    .iter()
+                    .filter(move |(_, area)| overlaps(old, area))
+                    .map(|(at, _)| *at)
+            })
+            .max()
+    };
 
     let mut output = GraphicsOutput::default();
     let mut deferred = Vec::new();
+    let mut covered_retired = Vec::new();
     if !retired.is_empty() {
         retired.sort_unstable();
         retired.dedup();
         let mut bytes = Vec::new();
         for image_id in retired {
             let reused = desired_placements.iter().any(|(id, _)| *id == image_id);
-            if swaps.contains_key(&image_id) && !reused {
-                deferred.push(image_id);
-                continue;
+            if !reused {
+                if swaps.contains_key(&image_id) {
+                    deferred.push(image_id);
+                    continue;
+                }
+                if let Some(last) = last_cover(cache, image_id) {
+                    // Retired whole, right after the last piece covering it.
+                    covered_retired.push((image_id, last));
+                    continue;
+                }
             }
             swaps.remove(&image_id);
             cache.retire_image(&mut bytes, image_id);
         }
         output.push_bytes(bytes);
     }
-    let mut stale = cache
-        .placements
-        .iter()
-        .filter(|(key, old)| {
-            !desired_placements.contains(key)
-                && swaps
-                    .get(&key.0)
-                    .is_none_or(|swap| !swap.areas.iter().any(|area| overlaps(old, area)))
-        })
-        .map(|(key, _)| *key)
-        .collect::<Vec<_>>();
+    let mut stale = Vec::new();
+    let mut stale_later = false;
+    for (key, old) in &undesired {
+        // A retired image deleted at the head took its pieces with it. A
+        // covered one is retired after its last cover, which takes the
+        // covered pieces; its other pieces still go first.
+        if !cache.placements.contains_key(key) {
+            continue;
+        }
+        if placed_after(old, None) {
+            stale_later = true;
+        } else {
+            stale.push(*key);
+        }
+    }
     stale.sort_unstable();
-    for key @ (host_id, placement_id) in stale {
+    for key in stale {
         let mut bytes = Vec::new();
-        encode_delete_placement(&mut bytes, host_id, placement_id);
+        cache.delete_placement(&mut bytes, key);
         output.push_bytes(bytes);
-        cache.placements.remove(&key);
-        cache.replayed_placements.remove(&key);
     }
 
     let swapping = !swaps.is_empty();
@@ -356,6 +432,13 @@ fn encode_graphics_output_retiring(
                 output.extend(transaction);
             }
         }
+        if covered_retired.iter().any(|(_, last)| *last == index) {
+            let mut bytes = Vec::new();
+            for (image_id, _) in covered_retired.iter().filter(|(_, last)| *last == index) {
+                cache.retire_image(&mut bytes, *image_id);
+            }
+            output.push_bytes(bytes);
+        }
         if !swapping || last_piece.get(&placement.source_key) != Some(&index) {
             continue;
         }
@@ -371,22 +454,40 @@ fn encode_graphics_output_retiring(
         }
         swaps.remove(&previous);
         let mut bytes = Vec::new();
+        let under_later = |old: &PlacementSignature| placed_after(old, Some(index));
         if desired_placements.iter().any(|(id, _)| *id == previous)
             || cache.sources.values().any(|id| *id == previous)
         {
             // Still shown elsewhere, or a replacement could not be placed.
-            delete_undesired_placements(&mut bytes, cache, &desired_placements, Some(previous));
+            if delete_undesired_placements(
+                &mut bytes,
+                cache,
+                &desired_placements,
+                Some(previous),
+                &under_later,
+            ) {
+                stale_later = true;
+            }
+        } else if cache
+            .placements
+            .iter()
+            .any(|((id, _), old)| *id == previous && under_later(old))
+        {
+            // A piece still to come lands on one of its pieces: retire
+            // after it.
+            deferred.push(previous);
         } else {
             cache.retire_image(&mut bytes, previous);
         }
         output.push_bytes(bytes);
     }
-    if swapping || !deferred.is_empty() {
+    if swapping || stale_later || !deferred.is_empty() {
         let mut bytes = Vec::new();
-        delete_undesired_placements(&mut bytes, cache, &desired_placements, None);
+        // Retiring an image takes its pieces with it, so retire first.
         for image_id in deferred {
             cache.retire_image(&mut bytes, image_id);
         }
+        delete_undesired_placements(&mut bytes, cache, &desired_placements, None, &|_| false);
         output.push_bytes(bytes);
     }
     cache.replay_placements = false;
@@ -394,24 +495,33 @@ fn encode_graphics_output_retiring(
     output
 }
 
+/// Deletes the undesired placements of `image`, or of every image, except
+/// those `defer` keeps for the end of the frame; returns whether any were
+/// kept.
 fn delete_undesired_placements(
     bytes: &mut Vec<u8>,
     cache: &mut HostGraphicsCache,
     desired: &HashSet<(u32, u32)>,
     image: Option<u32>,
-) {
-    let mut stale = cache
-        .placements
-        .keys()
-        .filter(|key| !desired.contains(key) && image.is_none_or(|id| key.0 == id))
-        .copied()
-        .collect::<Vec<_>>();
-    stale.sort_unstable();
-    for key @ (host_id, placement_id) in stale {
-        encode_delete_placement(bytes, host_id, placement_id);
-        cache.placements.remove(&key);
-        cache.replayed_placements.remove(&key);
+    defer: &dyn Fn(&PlacementSignature) -> bool,
+) -> bool {
+    let mut kept = false;
+    let mut stale = Vec::new();
+    for (key, old) in &cache.placements {
+        if desired.contains(key) || image.is_some_and(|id| key.0 != id) {
+            continue;
+        }
+        if defer(old) {
+            kept = true;
+        } else {
+            stale.push(*key);
+        }
     }
+    stale.sort_unstable();
+    for key in stale {
+        cache.delete_placement(bytes, key);
+    }
+    kept
 }
 
 impl HostGraphicsCache {
@@ -423,6 +533,12 @@ impl HostGraphicsCache {
         self.placements.retain(|(id, _), _| *id != image_id);
         self.sources.retain(|_, id| *id != image_id);
         self.replayed_placements.retain(|(id, _)| *id != image_id);
+    }
+
+    fn delete_placement(&mut self, bytes: &mut Vec<u8>, key: (u32, u32)) {
+        encode_delete_placement(bytes, key.0, key.1);
+        self.placements.remove(&key);
+        self.replayed_placements.remove(&key);
     }
 
     fn reset_replay(&mut self) {
@@ -1235,6 +1351,250 @@ mod tests {
             early < upload && upload < place && place < delete,
             "{text:?}"
         );
+    }
+
+    #[test]
+    fn source_replaced_by_another_under_it_is_deleted_after_the_placement() {
+        let mut cache = HostGraphicsCache::default();
+        update(&mut cache, &[terminal(7, 1, 0)], false);
+        let old = host_image_id(PaneId::from_raw(1), &terminal(7, 1, 0).placement);
+        let new = host_image_id(PaneId::from_raw(1), &terminal(99, 2, 1).placement);
+
+        let bytes = encode_graphics_output_retiring(&mut cache, &[terminal(99, 2, 1)], vec![old])
+            .into_inline_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        let upload = text.find(&format!("i={new},q=2,m=1;")).expect("upload");
+        let place = text.find(&format!("a=p,i={new},")).expect("placement");
+        let old_image = text
+            .find(&format!("a=d,d=I,i={old},"))
+            .expect("old image retired");
+        assert!(upload < place && place < old_image, "{text:?}");
+        assert_eq!(
+            text.find("a=d,"),
+            Some(old_image),
+            "nothing deleted earlier: {text:?}"
+        );
+        assert!(!cache.images.contains_key(&old) && !cache.sources.values().any(|id| *id == old));
+    }
+
+    #[test]
+    fn leaving_a_shared_image_keeps_its_piece_under_a_later_placement_for_the_tail() {
+        let mut cache = HostGraphicsCache::default();
+        update(&mut cache, &[terminal(7, 1, 0), terminal(99, 1, 5)], false);
+        let shared = host_image_id(PaneId::from_raw(1), &terminal(7, 1, 0).placement);
+        let moved = host_image_id(PaneId::from_raw(1), &terminal(7, 2, 10).placement);
+        let newcomer = host_image_id(PaneId::from_raw(1), &terminal(55, 3, 1).placement);
+
+        let bytes = update(
+            &mut cache,
+            &[terminal(7, 2, 10), terminal(99, 1, 5), terminal(55, 3, 1)],
+            false,
+        );
+        let text = String::from_utf8_lossy(&bytes);
+        let moved_placed = text.find(&format!("a=p,i={moved},")).expect("moved");
+        let newcomer_placed = text.find(&format!("a=p,i={newcomer},")).expect("newcomer");
+        let old_piece = text
+            .find(&format!("a=d,d=i,i={shared},"))
+            .expect("the piece source 7 left");
+        assert!(
+            moved_placed < newcomer_placed && newcomer_placed < old_piece,
+            "{text:?}"
+        );
+        assert!(!text.contains(&format!("a=d,d=I,i={shared},")), "{text:?}");
+    }
+
+    #[test]
+    fn swapped_away_image_under_a_later_placement_is_retired_after_it() {
+        let mut cache = HostGraphicsCache::default();
+        update(&mut cache, &[terminal(7, 1, 0)], false);
+        let old = host_image_id(PaneId::from_raw(1), &terminal(7, 1, 0).placement);
+        let moved = host_image_id(PaneId::from_raw(1), &terminal(7, 2, 10).placement);
+        let newcomer = host_image_id(PaneId::from_raw(1), &terminal(55, 3, 0).placement);
+
+        let bytes = update(&mut cache, &[terminal(7, 2, 10), terminal(55, 3, 0)], true);
+        let text = String::from_utf8_lossy(&bytes);
+        let moved_placed = text.find(&format!("a=p,i={moved},")).expect("moved");
+        let newcomer_placed = text.find(&format!("a=p,i={newcomer},")).expect("newcomer");
+        let retired = text
+            .find(&format!("a=d,d=I,i={old},"))
+            .expect("old image retired");
+        assert!(
+            moved_placed < newcomer_placed && newcomer_placed < retired,
+            "{text:?}"
+        );
+        assert_eq!(text.find("a=d,"), Some(retired), "{text:?}");
+        assert!(!cache.images.contains_key(&old));
+    }
+
+    #[test]
+    fn independent_swaps_retire_each_old_image_after_its_own_replacement() {
+        let mut cache = HostGraphicsCache::default();
+        // Host ids follow content, so every image gets its own fingerprint.
+        update(&mut cache, &[terminal(7, 1, 0), terminal(8, 2, 10)], false);
+        let a1 = host_image_id(PaneId::from_raw(1), &terminal(7, 1, 0).placement);
+        let b1 = host_image_id(PaneId::from_raw(1), &terminal(7, 3, 0).placement);
+        let a2 = host_image_id(PaneId::from_raw(1), &terminal(8, 2, 10).placement);
+        let b2 = host_image_id(PaneId::from_raw(1), &terminal(8, 4, 10).placement);
+        assert!(a1 != a2 && b1 != b2);
+
+        let bytes = update(&mut cache, &[terminal(7, 3, 0), terminal(8, 4, 10)], true);
+        let text = String::from_utf8_lossy(&bytes);
+        let at = |needle: String| {
+            text.find(&needle)
+                .unwrap_or_else(|| panic!("{needle}: {text:?}"))
+        };
+        let (place_b1, retire_a1) = (at(format!("a=p,i={b1},")), at(format!("a=d,d=I,i={a1},")));
+        let (upload_b2, place_b2, retire_a2) = (
+            at(format!("i={b2},q=2,m=1;")),
+            at(format!("a=p,i={b2},")),
+            at(format!("a=d,d=I,i={a2},")),
+        );
+        assert!(
+            place_b1 < retire_a1 && retire_a1 < upload_b2 && place_b2 < retire_a2,
+            "each swap ends before the next begins: {text:?}"
+        );
+    }
+
+    #[test]
+    fn moved_away_piece_of_a_retired_image_is_still_deleted_first_on_the_live_path() {
+        let mut cache = HostGraphicsCache::default();
+        update(&mut cache, &[terminal(7, 1, 0)], false);
+        let old = host_image_id(PaneId::from_raw(1), &terminal(7, 1, 0).placement);
+        let new = host_image_id(PaneId::from_raw(1), &terminal(7, 2, 10).placement);
+
+        cache.request_placement_replay();
+        let bytes = encode_graphics_output_retiring(&mut cache, &[terminal(7, 2, 10)], vec![old])
+            .into_inline_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        let early = text
+            .find(&format!("a=d,d=i,i={old},"))
+            .expect("moved-away piece");
+        let upload = text.find(&format!("i={new},q=2,m=1;")).expect("upload");
+        let place = text.find(&format!("a=p,i={new},")).expect("placement");
+        let retire = text.find(&format!("a=d,d=I,i={old},")).expect("old image");
+        assert!(
+            early < upload && upload < place && place < retire,
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn covered_retired_image_is_retired_right_after_its_last_cover() {
+        let piece = |placement_id, col| {
+            let mut placement = test_placement(col, 0);
+            placement.placement.placement_id = placement_id;
+            placement
+        };
+        let mut cache = HostGraphicsCache::default();
+        update(&mut cache, &[piece(3, 0), piece(4, 5)], false);
+        let old = host_image_id(PaneId::from_raw(1), &piece(3, 0).placement);
+        let first = host_image_id(PaneId::from_raw(1), &terminal(55, 9, 0).placement);
+        let second = host_image_id(PaneId::from_raw(1), &terminal(56, 8, 5).placement);
+        let third = host_image_id(PaneId::from_raw(1), &terminal(57, 7, 15).placement);
+
+        cache.request_placement_replay();
+        let bytes = encode_graphics_output_retiring(
+            &mut cache,
+            &[terminal(55, 9, 0), terminal(56, 8, 5), terminal(57, 7, 15)],
+            vec![old],
+        )
+        .into_inline_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        let at = |needle: String| {
+            text.find(&needle)
+                .unwrap_or_else(|| panic!("{needle}: {text:?}"))
+        };
+        let placed_second = at(format!("a=p,i={second},"));
+        let retire = at(format!("a=d,d=I,i={old},"));
+        let upload_third = at(format!("i={third},q=2,m=1;"));
+        assert!(
+            at(format!("a=p,i={first},")) < placed_second
+                && placed_second < retire
+                && retire < upload_third,
+            "{text:?}"
+        );
+        assert_eq!(
+            text.matches("a=d,").count(),
+            1,
+            "one delete for the image: {text:?}"
+        );
+    }
+
+    #[test]
+    fn uncovered_piece_of_a_covered_retired_image_is_still_deleted_first() {
+        let piece = |placement_id, col| {
+            let mut placement = test_placement(col, 0);
+            placement.placement.placement_id = placement_id;
+            placement
+        };
+        let mut cache = HostGraphicsCache::default();
+        update(&mut cache, &[piece(3, 0), piece(4, 10)], false);
+        let old = host_image_id(PaneId::from_raw(1), &piece(3, 0).placement);
+        let uncovered = host_placement_id(&piece(4, 10).source_key, &piece(4, 10).placement);
+        let new = host_image_id(PaneId::from_raw(1), &terminal(55, 9, 0).placement);
+
+        cache.request_placement_replay();
+        let bytes = encode_graphics_output_retiring(&mut cache, &[terminal(55, 9, 0)], vec![old])
+            .into_inline_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        let early = text
+            .find(&format!("a=d,d=i,i={old},p={uncovered},"))
+            .expect("the piece nothing covers");
+        let upload = text.find(&format!("i={new},q=2,m=1;")).expect("upload");
+        let place = text.find(&format!("a=p,i={new},")).expect("placement");
+        let retire = text.find(&format!("a=d,d=I,i={old},")).expect("old image");
+        assert!(
+            early < upload && upload < place && place < retire,
+            "{text:?}"
+        );
+        assert_eq!(text.matches("a=d,").count(), 2, "{text:?}");
+    }
+
+    #[test]
+    fn covered_retired_image_is_retired_in_one_delete_after_its_only_cover() {
+        let piece = |placement_id, col| {
+            let mut placement = test_placement(col, 0);
+            placement.placement.placement_id = placement_id;
+            placement
+        };
+        let mut cache = HostGraphicsCache::default();
+        update(&mut cache, &[piece(3, 0)], false);
+        let old = host_image_id(PaneId::from_raw(1), &piece(3, 0).placement);
+        let new = host_image_id(PaneId::from_raw(1), &terminal(55, 9, 0).placement);
+
+        let bytes = encode_graphics_output_retiring(&mut cache, &[terminal(55, 9, 0)], vec![old])
+            .into_inline_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        let place = text
+            .find(&format!("a=p,i={new},"))
+            .expect("newcomer placed");
+        let retire = text
+            .find(&format!("a=d,d=I,i={old},"))
+            .expect("old image retired");
+        assert!(place < retire, "{text:?}");
+        assert_eq!(
+            text.matches("a=d,").count(),
+            1,
+            "one delete for the image: {text:?}"
+        );
+    }
+
+    #[test]
+    fn source_replaced_by_another_elsewhere_is_deleted_first() {
+        let mut cache = HostGraphicsCache::default();
+        update(&mut cache, &[terminal(7, 1, 0)], false);
+        let old = host_image_id(PaneId::from_raw(1), &terminal(7, 1, 0).placement);
+        let new = host_image_id(PaneId::from_raw(1), &terminal(99, 2, 10).placement);
+
+        let bytes = encode_graphics_output_retiring(&mut cache, &[terminal(99, 2, 10)], vec![old])
+            .into_inline_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        let old_image = text
+            .find(&format!("a=d,d=I,i={old},"))
+            .expect("old image retired");
+        let upload = text.find(&format!("i={new},q=2,m=1;")).expect("upload");
+        assert!(old_image < upload, "{text:?}");
+        assert!(!text.contains(&format!("a=d,d=i,i={old},")), "{text:?}");
     }
 
     #[test]
