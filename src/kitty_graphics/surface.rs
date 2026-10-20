@@ -1294,6 +1294,55 @@ mod tests {
         assert_eq!(state.host.images.keys().copied().collect::<Vec<_>>(), [new]);
     }
 
+    #[test]
+    fn source_replaced_by_another_places_before_deleting_through_encode_output() {
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        let source = |image_id, fingerprint| {
+            let mut image = asset(
+                SurfaceGraphicsTarget::Pane {
+                    pane_id: "pane".into(),
+                },
+                fingerprint,
+                vec![fingerprint as u8, 2, 3, 255],
+            );
+            image.key.source = SurfaceGraphicsSource::Terminal {
+                target: SurfaceGraphicsTarget::Pane {
+                    pane_id: "pane".into(),
+                },
+                image_id,
+            };
+            image
+        };
+        let mut state = ClientState::default();
+        state.set_scope("sources");
+        let first = source(1, 1);
+        let old = state.inline_terminal_image_id(&first.key);
+        state.set_scene(scene(first, 0, 0));
+        let _ = state.encode(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+
+        let second = source(2, 2);
+        let new = state.inline_terminal_image_id(&second.key);
+        assert_ne!(new, old);
+        state.set_scene(scene(second, 0, 0));
+        let bytes = String::from_utf8(state.encode(
+            Visibility::Main,
+            (0, 0),
+            None,
+            cell,
+            &Occlusion::default(),
+        ))
+        .unwrap();
+        let upload = bytes
+            .find(&format!("a=t,t=d,f=32,s=1,v=1,i={new},"))
+            .unwrap();
+        assert!(upload < bytes.find(&format!("a=p,i={new},")).unwrap());
+        assert_swap(&bytes, new, old);
+        assert_eq!(state.host.images.keys().copied().collect::<Vec<_>>(), [new]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn native_slot_swap_places_before_deleting_through_encode_output() {
