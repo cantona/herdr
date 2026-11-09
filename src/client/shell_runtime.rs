@@ -35,7 +35,11 @@ pub(super) fn dispatch_client_shell_actions(
                 }
             }
             shell::ClientShellAction::ClipboardWrite(bytes) => {
-                crate::selection::write_selection_bytes(&bytes, copy_to_primary);
+                if crate::selection::write_selection_bytes(&bytes, copy_to_primary) {
+                    if let Some(shell) = shell.as_deref_mut() {
+                        repaint |= shell.show_copy_feedback(std::time::Instant::now());
+                    }
+                }
             }
             shell::ClientShellAction::ActivateEndpoint {
                 endpoint_id,

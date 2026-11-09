@@ -361,7 +361,7 @@ fn should_prefer_osc52() -> bool {
 /// Some terminals still only honor BEL-terminated OSC 52 writes, so herdr
 /// emits BEL here even though ST works in newer emulators.
 ///
-/// Returns false when the clipboard already holds the same text or output fails.
+/// Returns true when the text already matches or a clipboard write is dispatched.
 ///
 /// This must run in the process that owns the display the user is looking at --
 /// the client in server mode -- or PRIMARY lands on the wrong machine. When the
@@ -402,7 +402,7 @@ fn write_selection_bytes_with(
     }
     if !prefer_osc52 && clipboard_text_matches(bytes) == Some(true) {
         tracing::debug!(bytes = bytes.len(), "suppressed duplicate clipboard write");
-        return false;
+        return true;
     }
 
     if !prefer_osc52 && write_clipboard(bytes) {
@@ -415,6 +415,22 @@ fn write_selection_bytes_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_clipboard_copy_reports_success() {
+        assert!(write_selection_bytes_with(
+            b"same text",
+            false,
+            false,
+            |bytes| {
+                assert_eq!(bytes, b"same text");
+                Some(true)
+            },
+            |_| false,
+            |_| false,
+            |_| false,
+        ));
+    }
 
     #[test]
     fn visible_rects_match_selection_cells_when_scrolled_and_reversed() {
@@ -733,7 +749,10 @@ mod tests {
     #[test]
     fn primary_is_written_even_when_the_clipboard_already_matches() {
         let writes = SelectionWrites::new();
-        assert!(!writes.run(true, false, Some(true), true));
+        assert!(
+            writes.run(true, false, Some(true), true),
+            "a duplicate copy still counts"
+        );
         assert_eq!(
             writes.primary.get(),
             1,
